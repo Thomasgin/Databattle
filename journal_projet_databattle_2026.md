@@ -215,3 +215,66 @@
   - Ce modèle offre une amélioration nette par rapport au baseline initial (MAE ≈ 13,45 min → 12,71 min ; RMSE ≈ 27,24 min → 26,16 min).
   - Les prédictions complètes du meilleur modèle sur l’ensemble des alertes sont sauvegardées dans `advanced_model_predictions.csv` (colonnes : features + `duration_true` + `duration_pred_best`).
 
+### 16. Mise en dépôt Git et organisation du projet
+
+- 2026-03-09 – Initialisation du dépôt Git local dans le dossier du projet (`/home/cytech/Desktop/DataBattle`) :
+  - `git init`
+  - Ajout d’un fichier `.gitignore` pour ne pas versionner le gros fichier de données brutes fourni par l’organisateur :
+    - `data_train_databattle2026/segment_alerts_all_airports_train.csv`
+  - Cela permet de garder un dépôt léger tout en ayant la structure des données (dossier + fichiers de description) dans le versionnement.
+- 2026-03-09 – Connexion au dépôt GitHub existant `https://github.com/Thomasgin/Databattle.git` :
+  - Ajout du remote : `git remote add origin https://github.com/Thomasgin/Databattle.git`
+  - Récupération des branches distantes : `git fetch origin`
+  - Bascule sur la branche de travail : `git checkout -b hugo origin/hugo`
+- 2026-03-09 – Ajout de tous les fichiers du projet et création d’un commit :
+  - Fichiers ajoutés (principaux) :
+    - Scripts Python : `exploration_databattle_2026.py`, `preprocessing_databattle_2026.py`, `modeling_databattle_2026.py`, `advanced_modeling_databattle_2026.py`, `probabilities_databattle_2026.py`, `analysis_airports_databattle_2026.py`.
+    - Fichiers de résultats : `alerts_preprocessed.csv`, `summary_global.csv`, `summary_airport_counts.csv`, `model_validation_predictions.csv`, `validation_probabilities.csv`, `advanced_model_comparison.csv`, `advanced_model_predictions.csv`, `analysis_airport_summary.csv`, `analysis_airport_monthly.csv`.
+    - Fichiers de description : `journal_projet_databattle_2026.md`, `info_data.md`, `Info data.docx`, `presentation_sujet_lundi_2_mars.pdf`.
+    - Fichier `.gitignore`.
+  - Commit créé avec le message : **« Ajout du projet complet Data Battle 2026 »**.
+- 2026-03-09 – Poussée sur GitHub :
+  - La commande `git push origin hugo` est prête à être exécutée (l’échec observé localement est uniquement dû à l’absence de saisie des identifiants GitHub sur la machine).
+  - Une fois le push effectué avec les identifiants GitHub de l’utilisateur, la branche `hugo` du dépôt `Databattle` contiendra l’intégralité du projet tel que décrit dans ce journal.
+
+### 17. Récapitulatif global des étapes (de A à Z)
+
+1. **Compréhension du sujet et des données**
+   - Lecture des supports Meteorage (PDF de présentation et page officielle de l’évènement) et du document de description des données (`Info data.docx` → `info_data.md`).
+   - Reformulation de l’objectif : prédire la fin d’alerte d’orage de manière probabiliste à partir de données d’éclairs autour de six aéroports européens.
+2. **Planification**
+   - Définition d’un plan de travail : exploration → prétraitement → choix de la cible → modèles → probabilités de fin → analyse par aéroport → mise en dépôt.
+3. **Exploration des données brutes (`exploration_databattle_2026.py`)**
+   - Chargement du CSV brut `segment_alerts_all_airports_train.csv`.
+   - Conversion de `date` en `datetime`.
+   - Vérification des types et des valeurs manquantes.
+   - Sauvegarde de statistiques globales (`summary_global.csv`) et du nombre d’éclairs par aéroport (`summary_airport_counts.csv`).
+4. **Prétraitement au niveau alerte (`preprocessing_databattle_2026.py`)**
+   - Renommage de `airport_alert_id` en `alert_airport_id` pour correspondre à la documentation.
+   - Sélection des éclairs appartenant à une alerte (`alert_airport_id` non nul).
+   - Agrégation au niveau alerte : premières / dernières dates d’éclair, nombre d’éclairs, séparation nuage-sol / intra-nuage, durées en minutes, features calendaires.
+   - Sauvegarde du tableau d’alertes dans `alerts_preprocessed.csv`.
+5. **Définition de la cible et premier modèle (`modeling_databattle_2026.py`)**
+   - Cible : `duration_total_minutes` (durée totale de l’alerte).
+   - Features : compteurs d’éclairs, dates (année, mois, jour de l’année, heure) et aéroport encodé.
+   - Modèle baseline : Random Forest + préprocessing (scaling + one-hot).
+   - Split train/validation, calcul des métriques (MAE, RMSE, sigma des résidus) et sauvegarde des prédictions de validation (`model_validation_predictions.csv`).
+6. **Construction de probabilités de fin d’alerte (`probabilities_databattle_2026.py`)**
+   - Approximation de la durée comme loi normale \(\mathcal{N}(\hat{y}, \sigma^2)\).
+   - Calcul, pour chaque alerte de validation, de la probabilité que l’alerte soit terminée avant différents horizons (10, 20, 30, 45, 60 min).
+   - Sauvegarde des résultats dans `validation_probabilities.csv`.
+7. **Analyse des tendances par aéroport (`analysis_airports_databattle_2026.py`)**
+   - Synthèse globale par aéroport : nombre d’alertes, durées moyenne/médiane/max, nombre moyen d’éclairs.
+   - Analyse par aéroport et par mois : nombre d’alertes et durée moyenne pour étudier les tendances saisonnières.
+   - Sauvegarde dans `analysis_airport_summary.csv` et `analysis_airport_monthly.csv`.
+8. **Optimisation avancée des modèles (`advanced_modeling_databattle_2026.py`)**
+   - Comparaison en validation croisée (K=5) de plusieurs modèles d’arbres : Random Forest, Extra Trees, Gradient Boosting.
+   - RandomizedSearchCV sur la Random Forest pour affiner les hyperparamètres.
+   - Sélection du meilleur modèle (`rf_tuned`) sur la base de la MAE et de la RMSE.
+   - Sauvegarde du tableau de comparaison (`advanced_model_comparison.csv`) et des prédictions complètes du meilleur modèle (`advanced_model_predictions.csv`).
+9. **Mise sous contrôle de version (Git + GitHub)**
+   - Initialisation du dépôt Git local, création du `.gitignore`, connexion au dépôt GitHub `Thomasgin/Databattle` sur la branche `hugo`.
+   - Commit unique résumant l’ajout du projet complet.
+   - Préparation du push vers GitHub (à finaliser avec les identifiants de l’utilisateur).
+
+Ce récapitulatif permet de suivre pas à pas l’évolution du projet, depuis la compréhension du sujet jusqu’au modèle final optimisé et à la mise en dépôt, tout en reliant chaque étape aux scripts et fichiers produits.
