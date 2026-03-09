@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Données brutes volumineuses (fichier fourni par la Data Battle)
+data_train_databattle2026/segment_alerts_all_airports_train.csv
+
