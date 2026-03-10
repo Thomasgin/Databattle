@@ -1,0 +1,18 @@
+data:
+  csv_path: "database.csv"
+  target_col: "is_last_lightning_cloud_ground"
+  group_col: "airport_alert_id"
+  exclude_feature_cols:
+    - "is_last_lightning_cloud_ground"
+
+model:
+  n_clusters: 8
+  threshold: 0.5
+  random_state: 42
+  fit_on_all_rows: true
+
+split:
+  test_size: 0.2
+
+output:
+  output_dir: "outputs"
