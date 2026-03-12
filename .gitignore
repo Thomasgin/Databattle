@@ -1,7 +1,25 @@
 __pycache__/
 *.pyc
 .DS_Store
+.venv/
 
 # Données brutes volumineuses (fichier fourni par la Data Battle)
 data_train_databattle2026/segment_alerts_all_airports_train.csv
+
+# Fichiers générés par les scripts (réexécuter le pipeline pour les recréer)
+alerts_preprocessed.csv
+advanced_model_predictions.csv
+advanced_model_comparison.csv
+minute_at_threshold.csv
+probability_every_minute.csv
+gain_vs_regle_30min.csv
+comparison_baseline_improved.csv
+graph_probability_per_minute.png
+summary_global.csv
+summary_airport_counts.csv
+summary_alerts.csv
+model_validation_predictions.csv
+validation_probabilities.csv
+analysis_airport_summary.csv
+analysis_airport_monthly.csv
 

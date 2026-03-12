@@ -214,6 +214,7 @@
     - `max_features` = `sqrt`.
   - Ce modèle offre une amélioration nette par rapport au baseline initial (MAE ≈ 13,45 min → 12,71 min ; RMSE ≈ 27,24 min → 26,16 min).
   - Les prédictions complètes du meilleur modèle sur l’ensemble des alertes sont sauvegardées dans `advanced_model_predictions.csv` (colonnes : features + `duration_true` + `duration_pred_best`).
+- **Ajout de XGBoost** : le script `advanced_modeling_databattle_2026.py` inclut désormais un modèle **XGBoost** (`xgb_default`) dans la comparaison (500 arbres, learning_rate 0,05, max_depth 6). Si la librairie `xgboost` est installée (`pip install xgboost` ou `pip install -r requirements.txt`), il est évalué en validation croisée avec les autres modèles ; le meilleur (au sens de la MAE) est alors retenu pour les prédictions finales. Un fichier `requirements.txt` liste les dépendances du projet (pandas, numpy, scikit-learn, xgboost).
 
 ### 16. Mise en dépôt Git et organisation du projet
 
@@ -268,7 +269,7 @@
    - Analyse par aéroport et par mois : nombre d’alertes et durée moyenne pour étudier les tendances saisonnières.
    - Sauvegarde dans `analysis_airport_summary.csv` et `analysis_airport_monthly.csv`.
 8. **Optimisation avancée des modèles (`advanced_modeling_databattle_2026.py`)**
-   - Comparaison en validation croisée (K=5) de plusieurs modèles d’arbres : Random Forest, Extra Trees, Gradient Boosting.
+   - Comparaison en validation croisée (K=5) de plusieurs modèles d’arbres : Random Forest, Extra Trees, Gradient Boosting, et XGBoost (si installé).
    - RandomizedSearchCV sur la Random Forest pour affiner les hyperparamètres.
    - Sélection du meilleur modèle (`rf_tuned`) sur la base de la MAE et de la RMSE.
    - Sauvegarde du tableau de comparaison (`advanced_model_comparison.csv`) et des prédictions complètes du meilleur modèle (`advanced_model_predictions.csv`).
@@ -278,3 +279,11 @@
    - Préparation du push vers GitHub (à finaliser avec les identifiants de l’utilisateur).
 
 Ce récapitulatif permet de suivre pas à pas l’évolution du projet, depuis la compréhension du sujet jusqu’au modèle final optimisé et à la mise en dépôt, tout en reliant chaque étape aux scripts et fichiers produits.
+
+### 18. Améliorations pour gagner des minutes (sans overlifting)
+
+- 2026-03-09 – Objectif : améliorer les prédictions pour réduire le temps d'attente tout en maîtrisant l'**overlifting** (lever l'alerte avant la fin réelle de l'orage).
+- **Nouvelles features** (sans fuite de données) : dans `preprocessing_databattle_2026.py`, agrégation par alerte : `mean_dist`, `std_dist`, `mean_amplitude`. Pas de `lightning_rate` (éviter fuite : la durée est la cible).
+- **Comparaison baseline vs amélioré** (`compare_baseline_improved.py`) : baseline = features d'origine ; amélioré = baseline + mean_dist, std_dist, mean_amplitude. Même RF, 5-fold CV. Métriques : MAE, RMSE, sigma, gain médian vs règle 30 min, **taux d'overlifting** (cible ~5 % pour seuil 95 %).
+- **Résultats** (`comparison_baseline_improved.csv`) : Baseline MAE ≈ 12,96 min, overlifting ≈ 3,9 %. Amélioré MAE ≈ 12,30 min, overlifting ≈ 3,9 %. À sécurité égale, le modèle amélioré réduit MAE et sigma. Le modèle final utilise les features améliorées.
+- **Meilleure version pour temps d'alerte minimal** : dans `advanced_modeling_databattle_2026.py`, comparaison de rf_tuned, et_tuned, gbr_tuned (plus modèles de base). Sélection automatique du modèle à **plus faible MAE** (temps d'alerte le plus court à complexité raisonnable). Actuellement retenu : **rf_tuned** (MAE CV ≈ 12,22 min). Une seule pipeline (préprocesseur + un modèle), pas d’ensemble lourd.

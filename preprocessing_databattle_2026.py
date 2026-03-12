@@ -43,6 +43,9 @@ def build_alert_level_table(df: pd.DataFrame) -> pd.DataFrame:
             n_cloud_ground=("icloud", lambda s: (~s.astype(bool)).sum()),
             n_intra_cloud=("icloud", lambda s: s.astype(bool).sum()),
             last_cloud_ground_time=("date", "max"),
+            mean_dist=("dist", "mean"),
+            std_dist=("dist", "std"),
+            mean_amplitude=("amplitude", "mean"),
         )
     )
 
@@ -53,6 +56,9 @@ def build_alert_level_table(df: pd.DataFrame) -> pd.DataFrame:
     grouped["duration_until_last_cg_minutes"] = (
         (grouped["last_cloud_ground_time"] - grouped["start_time"]).dt.total_seconds() / 60.0
     )
+
+    # std_dist à 0 si NaN (1 seul éclair). Pas de lightning_rate (éviter fuite: durée = cible)
+    grouped["std_dist"] = grouped["std_dist"].fillna(0.0)
 
     # On ajoute des features calendaires simples basées sur le début d'alerte
     grouped["start_year"] = grouped["start_time"].dt.year
