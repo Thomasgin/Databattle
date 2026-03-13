@@ -82,7 +82,14 @@ def main() -> None:
         "start_month",
         "start_dayofyear",
         "start_hour",
+        "mean_maxis",
+        "max_maxis",
+        "density",
+        "last_lightning_is_cg",
+        "storm_size_km",
     ]
+    # Ne garder que les colonnes présentes (compatibilité si ancien preprocessed)
+    feature_cols_numeric = [c for c in feature_cols_numeric if c in df.columns]
     feature_cols_cat = ["airport"]
 
     X = df[feature_cols_numeric + feature_cols_cat].copy()

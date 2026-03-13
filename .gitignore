@@ -23,3 +23,6 @@ validation_probabilities.csv
 analysis_airport_summary.csv
 analysis_airport_monthly.csv
 
+# CSV dérivés du nouveau dataset (seuls ceux nécessaires sont versionnés)
+alerts_final_model_enriched.csv
+
