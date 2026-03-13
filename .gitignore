@@ -8,6 +8,7 @@ data_train_databattle2026/segment_alerts_all_airports_train.csv
 
 # Fichiers générés par les scripts (réexécuter le pipeline pour les recréer)
 alerts_preprocessed.csv
+alerts_preprocessed_with_cluster.csv
 advanced_model_predictions.csv
 advanced_model_comparison.csv
 minute_at_threshold.csv

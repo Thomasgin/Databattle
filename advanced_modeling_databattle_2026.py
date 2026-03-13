@@ -64,9 +64,14 @@ def evaluate_model_cv(
 
 def main() -> None:
     base_dir = pathlib.Path(__file__).resolve().parent
+    data_path_with_cluster = base_dir / "alerts_preprocessed_with_cluster.csv"
     data_path = base_dir / "alerts_preprocessed.csv"
-
-    print(f"Chargement des données agrégées depuis : {data_path}")
+    if data_path_with_cluster.exists():
+        data_path = data_path_with_cluster
+        print("Chargement avec type d'orage (cluster K-Means) :", data_path.name)
+    else:
+        print("Fichier sans cluster. Pour inclure le type d'orage : python3 clustering_storm_types.py")
+    print(f"  Données : {data_path}")
     df = pd.read_csv(data_path)
 
     y = df["duration_total_minutes"].values
@@ -91,6 +96,10 @@ def main() -> None:
     # Ne garder que les colonnes présentes (compatibilité si ancien preprocessed)
     feature_cols_numeric = [c for c in feature_cols_numeric if c in df.columns]
     feature_cols_cat = ["airport"]
+    if "cluster" in df.columns:
+        df["cluster"] = df["cluster"].astype(str)  # pour OneHotEncoder
+        feature_cols_cat = ["airport", "cluster"]
+        print("  Type d'orage (cluster) inclus comme variable catégorielle.")
 
     X = df[feature_cols_numeric + feature_cols_cat].copy()
 

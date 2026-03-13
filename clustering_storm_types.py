@@ -114,6 +114,12 @@ def main() -> None:
         if comment:
             print("  Profil :", ", ".join(comment))
 
+    # Sauvegarde pour utilisation dans le modèle (type d'orage comme feature)
+    out_path = BASE_DIR / "alerts_preprocessed_with_cluster.csv"
+    df.to_csv(out_path, index=False)
+    print(f"\nFichier avec cluster sauvegardé : {out_path}")
+    print("  Utiliser ce fichier dans advanced_modeling pour inclure le type d'orage.")
+
 
 if __name__ == "__main__":
     main()
