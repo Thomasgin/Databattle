@@ -1,45 +1,36 @@
 import pathlib
-from typing import Dict, Tuple
+import re
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor, RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import KFold, RandomizedSearchCV, cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 try:
     from xgboost import XGBRegressor
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
-from sklearn.model_selection import KFold, RandomizedSearchCV, train_test_split, cross_val_predict
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 RANDOM_STATE = 42
 
 
-def build_preprocessor(feature_cols_numeric, feature_cols_cat):
-    numeric_transformer = Pipeline(
-        steps=[
-            ("scaler", StandardScaler()),
-        ]
-    )
-
-    categorical_transformer = Pipeline(
-        steps=[
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
-        ]
-    )
-
-    preprocessor = ColumnTransformer(
+def build_preprocessor(feature_cols_numeric: List[str], feature_cols_cat: List[str]) -> ColumnTransformer:
+    numeric_transformer = Pipeline(steps=[("scaler", StandardScaler())])
+    categorical_transformer = Pipeline(steps=[("onehot", OneHotEncoder(handle_unknown="ignore"))])
+    return ColumnTransformer(
         transformers=[
             ("num", numeric_transformer, feature_cols_numeric),
             ("cat", categorical_transformer, feature_cols_cat),
         ]
     )
-    return preprocessor
+
 
 
 def evaluate_model_cv(
@@ -49,18 +40,101 @@ def evaluate_model_cv(
     y: np.ndarray,
     n_splits: int = 5,
 ) -> Tuple[float, float]:
-    """Évalue un modèle par validation croisée, retourne (mae_moyenne, rmse_moyenne)."""
+    """Évalue un modèle par validation croisée, retourne (mae, rmse)."""
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-
-    # cross_val_predict pour avoir des prédictions "out-of-fold"
     y_pred_cv = cross_val_predict(pipeline, X, y, cv=kf, n_jobs=-1)
 
     mae = mean_absolute_error(y, y_pred_cv)
     mse = mean_squared_error(y, y_pred_cv)
-    rmse = np.sqrt(mse)
+    rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
     print(f"[{name}] MAE CV = {mae:.3f} min, RMSE CV = {rmse:.3f} min")
     return mae, rmse
 
+def infer_cluster_feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+    """
+    Détecte automatiquement des features issues d'un clustering.
+
+    - Labels de cluster (faible cardinalité) -> catégoriel (OneHotEncoder)
+    - Colonnes de type proba/score de cluster -> numériques
+    """
+    reserved = {
+        "duration_total_minutes",
+        "airport",
+        "alert_airport_id",
+        "start_time",
+        "end_time",
+        "last_cloud_ground_time",
+    }
+
+    numeric_cluster_cols: List[str] = []
+    cat_cluster_cols: List[str] = []
+
+    # 1) Colonnes probas/scores (numériques)
+    proba_tokens = ("proba", "prob", "score", "soft", "membership")
+    for c in df.columns:
+        cl = c.lower()
+        if any(t in cl for t in proba_tokens) and ("cluster" in cl or "storm" in cl or "type" in cl):
+            if pd.api.types.is_numeric_dtype(df[c]):
+                numeric_cluster_cols.append(c)
+
+    # 2) Colonne label unique (catégorielle)
+    label_candidates: List[str] = []
+    preferred_names = (
+        "cluster",
+        "clusters",
+        "cluster_id",
+        "cluster_label",
+        "kmeans",
+        "kmeans_label",
+        "storm_type",
+        "stormtype",
+        "type_orage",
+        "storm_cluster",
+    )
+    for c in df.columns:
+        if c in reserved:
+            continue
+        cl = c.lower()
+        # Si c'est manifestement une proba/score/membership, ce n'est pas un label "classe"
+        if any(t in cl for t in proba_tokens):
+            continue
+        # Evite de prendre des colonnes du type "cluster_0", "stormtype_1" comme label
+        # (ce sont souvent des one-hot / membership, pas un identifiant de cluster unique)
+        if re.search(r"(cluster|storm|kmeans).*_\d+$", cl):
+            continue
+
+        # Match flexible sur le nom de colonne (aide pour les variantes)
+        if cl in preferred_names:
+            label_candidates.append(c)
+            continue
+        if any(p in cl for p in preferred_names):
+            label_candidates.append(c)
+            continue
+        if ("cluster" in cl) or ("stormtype" in cl) or ("storm_type" in cl) or ("kmeans" in cl):
+            label_candidates.append(c)
+            continue
+
+    # Choisit le meilleur candidat label: faible cardinalité et non numérique continue
+    best_label = None
+    best_card = None
+    for c in label_candidates:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) and (s.dropna().astype(float) % 1 != 0).any():
+            continue
+        card = int(s.nunique(dropna=True))
+        if card <= 1:
+            continue
+        if best_card is None or card < best_card:
+            best_label = c
+            best_card = card
+
+    if best_label is not None:
+        cat_cluster_cols.append(best_label)
+
+    # Déduplique
+    numeric_cluster_cols = sorted(set(numeric_cluster_cols))
+    cat_cluster_cols = sorted(set(cat_cluster_cols))
+    return numeric_cluster_cols, cat_cluster_cols
 
 def main() -> None:
     base_dir = pathlib.Path(__file__).resolve().parent
@@ -68,15 +142,17 @@ def main() -> None:
     data_path = base_dir / "alerts_preprocessed.csv"
     if data_path_with_cluster.exists():
         data_path = data_path_with_cluster
-        print("Chargement avec type d'orage (cluster K-Means) :", data_path.name)
+        print("Chargement avec clustering :", data_path.name)
     else:
-        print("Fichier sans cluster. Pour inclure le type d'orage : python3 clustering_storm_types.py")
+        print("Fichier sans clustering. Pour inclure le type d'orage : python3 clustering_storm_types.py (ou script équivalent).")
     print(f"  Données : {data_path}")
-    df = pd.read_csv(data_path)
 
+    df = pd.read_csv(data_path)
+    if "duration_total_minutes" not in df.columns:
+        raise ValueError("La colonne 'duration_total_minutes' est manquante dans le CSV d'entrée.")
     y = df["duration_total_minutes"].values
 
-    feature_cols_numeric = [
+    base_numeric = [
         "n_lightnings",
         "n_cloud_ground",
         "n_intra_cloud",
@@ -94,12 +170,21 @@ def main() -> None:
         "storm_size_km",
     ]
     # Ne garder que les colonnes présentes (compatibilité si ancien preprocessed)
-    feature_cols_numeric = [c for c in feature_cols_numeric if c in df.columns]
-    feature_cols_cat = ["airport"]
-    if "cluster" in df.columns:
-        df["cluster"] = df["cluster"].astype(str)  # pour OneHotEncoder
-        feature_cols_cat = ["airport", "cluster"]
-        print("  Type d'orage (cluster) inclus comme variable catégorielle.")
+    feature_cols_numeric = [c for c in base_numeric if c in df.columns]
+    feature_cols_cat = ["airport"] if "airport" in df.columns else []
+
+    # Ajoute automatiquement des colonnes issues d'un clustering (label catégoriel + proba/score numérique)
+    extra_numeric, extra_cat = infer_cluster_feature_columns(df)
+    for c in extra_numeric:
+        if c not in feature_cols_numeric:
+            feature_cols_numeric.append(c)
+    for c in extra_cat:
+        if c not in feature_cols_cat:
+            feature_cols_cat.append(c)
+
+    # Cast des catégorielles en string pour OneHotEncoder
+    for c in feature_cols_cat:
+        df[c] = df[c].astype(str)
 
     X = df[feature_cols_numeric + feature_cols_cat].copy()
 

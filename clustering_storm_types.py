@@ -32,8 +32,9 @@ def main() -> None:
     print(f"Chargement : {csv_path}  ({len(df)} alertes)")
 
     # Sélection de variables physiques pour décrire un orage
+    # IMPORTANT (anti-fuite) : ne PAS inclure la cible duration_total_minutes
+    # dans les variables du clustering, sinon les clusters “connaissent” la durée.
     candidate_cols = [
-        "duration_total_minutes",   # durée de l'alerte
         "n_lightnings",            # activité totale
         "n_cloud_ground",          # éclairs au sol
         "n_intra_cloud",           # éclairs intra-nuage
@@ -82,15 +83,17 @@ def main() -> None:
 
     # Résumé lisible par cluster
     print("\nRésumé interprétable par type d'orage (ordre croissant de durée):")
+    cluster_duration_median = df.groupby("cluster")["duration_total_minutes"].median()
     centers_df["cluster"] = centers_df.index
-    centers_sorted = centers_df.sort_values("duration_total_minutes")
+    centers_df["duration_median"] = centers_df["cluster"].map(cluster_duration_median)
+    centers_sorted = centers_df.sort_values("duration_median")
     for _, row in centers_sorted.iterrows():
         cl = int(row["cluster"])
-        dur = row["duration_total_minutes"]
-        n_tot = row["n_lightnings"]
-        n_cg = row["n_cloud_ground"]
-        size_km = row.get("storm_size_km", np.nan)
-        dens = row.get("density", np.nan)
+        dur = float(row["duration_median"])
+        n_tot = float(row.get("n_lightnings", np.nan))
+        n_cg = float(row.get("n_cloud_ground", np.nan))
+        size_km = float(row.get("storm_size_km", np.nan)) if "storm_size_km" in row else np.nan
+        dens = float(row.get("density", np.nan)) if "density" in row else np.nan
 
         print(f"\n--- Cluster {cl} ---")
         print(f"  Durée typique           : ~{dur:.1f} minutes")
