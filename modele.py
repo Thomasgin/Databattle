@@ -151,16 +151,26 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     print(f"  Alertes : {len(y)}  |  Variables : {len(feature_cols)}")
     print()
 
-    # Choix du meilleur modele
+    # Choix du meilleur modèle (critère : MAE la plus faible en CV)
+    best_name, best_mae, best_rmse = min(results, key=lambda x: x[1])
 
-    best_mae = min(r[1] for r in results)
+    labels_fr = {
+        "rf_default": "Random Forest (paramètres par défaut)",
+        "rf_tuned": "Random Forest (hyperparamètres optimisés)",
+        "xgb_tuned": "XGBoost (hyperparamètres optimisés)",
+    }
 
     for name, mae, rmse in sorted(results, key=lambda x: x[1]):
         sous_10 = "  ✓ sous 10 min !" if mae < 10 else ""
         print(f"  {name:12s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min{sous_10}")
     print("=" * 55)
+    print(
+        f"  Modèle retenu : {best_name} — {labels_fr.get(best_name, best_name)} "
+        f"(MAE = {best_mae:.3f} min, RMSE = {best_rmse:.3f} min)"
+    )
+    print("=" * 55)
     if best_mae < 10:
-        print("  Objectif < 10 min MAE atteint.")#si modele avec MAE < 10 min
+        print("  Objectif < 10 min MAE atteint.")
     else:
         print(f"  Meilleur MAE : {best_mae:.2f} min. Descendre sous 10 min peut être limité par la variabilité météo.")
 
