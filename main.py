@@ -2,6 +2,7 @@ import argparse
 import pathlib
 
 from modele import run_model
+from probabilite_par_minute import run_probabilites
 
 
 def main() -> None:
@@ -16,6 +17,11 @@ def main() -> None:
         "--skip-clustering",
         action="store_true",
         help="Ne relance pas le clustering; utilise alerts_with_clusters.csv existant.",
+    )
+    parser.add_argument(
+        "--skip-probabilites",
+        action="store_true",
+        help="N'exécute pas probabilite_par_minute.py après le modèle.",
     )
     args = parser.parse_args()
 
@@ -32,7 +38,7 @@ def main() -> None:
             if exc.name in {"seaborn", "matplotlib"}:
                 if out_csv.exists():
                     print(
-                        "[1/2] Dépendance manquante pour clustering "
+                        "[1/3] Dépendance manquante pour clustering "
                         f"({exc.name}). Fallback vers CSV existant: {out_csv.name}"
                     )
                 else:
@@ -46,11 +52,11 @@ def main() -> None:
         else:
             if not input_csv.exists():
                 raise FileNotFoundError(f"Fichier d'entrée introuvable pour le clustering: {input_csv}")
-            print(f"[1/2] Clustering sur: {input_csv}")
+            print(f"[1/3] Clustering sur: {input_csv}")
             df = load_and_clean(str(input_csv))
             run_clustering(df)
     else:
-        print("[1/2] Clustering ignoré (--skip-clustering).")
+        print("[1/3] Clustering ignoré (--skip-clustering).")
 
     if not out_csv.exists():
         raise FileNotFoundError(
@@ -58,8 +64,14 @@ def main() -> None:
             "Exécute d'abord clustering.py ou main.py sans --skip-clustering."
         )
 
-    print(f"[2/2] Modèle de régression sur: {out_csv}")
+    print(f"[2/3] Modèle de régression sur: {out_csv}")
     run_model(csv_path=str(out_csv), use_enriched=False)
+
+    if not args.skip_probabilites:
+        print("[3/3] Probabilités par minute (terminal)...")
+        run_probabilites(base_dir)
+    else:
+        print("[3/3] Probabilités ignorées (--skip-probabilites).")
 
 
 if __name__ == "__main__":
