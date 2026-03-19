@@ -118,6 +118,7 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
 
     print("  XGBoost tuned MODELE 3")
 
+    search_xgb = None
     if HAS_XGB:
         print("  Tuning XGBoost...")
         pipe_xgb = Pipeline([
@@ -173,6 +174,36 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         print("  Objectif < 10 min MAE atteint.")
     else:
         print(f"  Meilleur MAE : {best_mae:.2f} min. Descendre sous 10 min peut être limité par la variabilité météo.")
+
+    # Prédictions finales (meilleur modèle) pour probabilite_par_minute.py
+    if best_name == "rf_default":
+        best_final = Pipeline(
+            [
+                (
+                    "model",
+                    RandomForestRegressor(
+                        n_estimators=rf_estimators,
+                        max_depth=None,
+                        random_state=RANDOM_STATE,
+                        n_jobs=1,
+                    ),
+                ),
+            ]
+        )
+    elif best_name == "rf_tuned":
+        best_final = search.best_estimator_
+    elif best_name == "xgb_tuned" and HAS_XGB and search_xgb is not None:
+        best_final = search_xgb.best_estimator_
+    else:
+        best_final = search.best_estimator_
+
+    best_final.fit(X, y)
+    y_pred_final = best_final.predict(X)
+    preds_path = BASE_DIR / "advanced_model_predictions.csv"
+    pd.DataFrame({"duration_true": y.astype(float), "duration_pred_best": y_pred_final}).to_csv(
+        preds_path, index=False
+    )
+    print(f"\n  Prédictions sauvegardées pour les probabilités : {preds_path.name}")
 
 
 if __name__ == "__main__":

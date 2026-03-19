@@ -25,8 +25,9 @@ Sinon, utilise `main.py` avec `--skip-clustering` (voir ci-dessous) si le fichie
 | `alerts_preprocessed.csv` | Entrée du clustering (une ligne = une alerte). |
 | `alerts_with_clusters.csv` | Sortie du clustering (alertes + colonne `storm_type`). |
 | `clustering.py` | Nettoyage + K-Means + visualisations (ne pas modifier si imposé). |
-| `modele.py` | Random Forest (défaut + tuné) et XGBoost si installé. |
-| `main.py` | Enchaîne clustering puis modèle. |
+| `modele.py` | Random Forest (défaut + tuné) et XGBoost si installé ; génère `advanced_model_predictions.csv`. |
+| `probabilite_par_minute.py` | Probabilités minute par minute + gain vs règle 30 min (lit `advanced_model_predictions.csv`). |
+| `main.py` | Enchaîne : clustering → modèle → probabilités (étapes 1/3, 2/3, 3/3). |
 
 ---
 
@@ -39,9 +40,15 @@ cd /chemin/vers/Databattle
 python3 main.py --skip-clustering
 ```
 
+Pour **ne pas** lancer l’affichage des probabilités après le modèle :
+
+```bash
+python3 main.py --skip-clustering --skip-probabilites
+```
+
 ---
 
-## Exécution complète (clustering + modèle)
+## Exécution complète (clustering + modèle + probabilités)
 
 1. Avoir `alerts_preprocessed.csv` à la racine du projet.
 2. Installer `seaborn` et `matplotlib` (voir prérequis).
@@ -52,13 +59,15 @@ cd /chemin/vers/Databattle
 python3 main.py
 ```
 
-Option : autre fichier d’entrée pour le clustering :
+À la fin, le modèle écrit `advanced_model_predictions.csv`, puis `main.py` appelle `probabilite_par_minute.py` (sortie terminal uniquement).
+
+---
+
+## Probabilités seules (si le modèle a déjà tourné)
 
 ```bash
-python3 main.py --input /chemin/vers/mon_fichier.csv
+python3 probabilite_par_minute.py
 ```
-
-*(Le script attend en sortie `alerts_with_clusters.csv` à la racine du projet.)*
 
 ---
 
@@ -76,6 +85,12 @@ Avec les données enrichies (si ces fichiers existent) :
 
 ```bash
 python3 modele.py --enriched
+```
+
+Ensuite, pour les probabilités :
+
+```bash
+python3 probabilite_par_minute.py
 ```
 
 ---
