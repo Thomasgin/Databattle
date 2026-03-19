@@ -1,52 +1,54 @@
 import pandas as pd
 import xgboost as xgb
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, mean_absolute_error
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import LabelEncoder
 
-# --- 1. PRÉPARATION ---
+# 1. Chargement des données
 df = pd.read_csv('alerts_with_clusters.csv')
-df_final = pd.get_dummies(df, columns=['airport'], prefix='apt')
 
-features_clustering = ['prox_ratio', 'ic_ratio', 'speed', 'log_storm_surface', 
-                        'mean_amplitude', 'log_n_lightnings', 'mean_dist']
-features_xgb = features_clustering + ['hour_sin', 'hour_cos', 'storm_type']
-airport_cols = [col for col in df_final.columns if col.startswith('apt_')]
+# 2. Séparation des variables (X) et de la cible (y)
+# On garde les 13 variables pour l'instant (incluant le cluster)
+X = df.drop(['lightning_id', 'lightning_airport_id','airport_alert_id'], axis=1, errors='ignore')
+y = df['is_last_lightning_cloud_ground']
 
-X = df_final[features_xgb + airport_cols]
-y_duration = df_final['duration_minutes']
-y_risk = (df_final['duration_minutes'] > 20).astype(int)
+# 3. Prétraitement
+# Conversion des variables textuelles en nombres (One-Hot Encoding)
+X = pd.get_dummies(X)
 
-X_train, X_test, y_train_risk, y_test_risk = train_test_split(X, y_risk, test_size=0.2, random_state=42)
-_, _, y_train_time, y_test_time = train_test_split(X, y_duration, test_size=0.2, random_state=42)
+# Si votre cible 'y' est du texte (ex: "A", "B"), on la transforme en 0, 1...
+if y.dtype == 'boolean':
+    le = LabelEncoder()
+    y = le.fit_transform(y)
 
-# --- 2. ENTRAÎNEMENT ---
-# Modèle de Classification (Probabilité de persistance)
-model_risk = xgb.XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=4, random_state=42)
-model_risk.fit(X_train, y_train_risk)
+# 4. Division en ensembles d'entraînement et de test (80% / 20%)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Modèle de Régression (Temps restant)
-model_time = xgb.XGBRegressor(n_estimators=150, learning_rate=0.05, max_depth=4, random_state=42)
-model_time.fit(X_train, y_train_time)
+# 5. Création et entraînement du modèle XGBoost
+# On utilise des paramètres robustes par défaut
+model = xgb.XGBClassifier(
+    n_estimators=100,
+    learning_rate=0.1,
+    max_depth=5,
+    random_state=42,
+    use_label_encoder=False,
+    eval_metric='logloss'
+)
 
-# --- 3. ÉVALUATION ET PRÉDICTION ---
-def get_storm_prediction(index):
-    data_point = X.iloc[[index]]
-    prob_risk = model_risk.predict_proba(data_point)[0][1]
-    est_minutes = model_time.predict(data_point)[0]
-    cluster_id = df.iloc[index]['storm_type']
-    
-    print(f"\n--- RÉSULTAT IA (ORAGE TYPE {int(cluster_id)}) ---")
-    print(f"Durée estimée : {est_minutes:.1f} minutes")
-    print(f"Confiance de l'alerte (Risque >20min) : {prob_risk*100:.1f}%")
-    
-    verdict = "MAINTIEN ALERTE" if prob_risk > 0.15 else "LEVÉE ALERTE"
-    print(f"VERDICT : {verdict}")
+model.fit(X_train, y_train)
 
-if __name__ == "__main__":
-    # Petit check de performance sur le set de test
-    preds_risk = model_risk.predict(X_test)
-    print("Performance Modèle Risque :")
-    print(classification_report(y_test_risk, preds_risk))
-    
-    # Test sur un exemple
-    get_storm_prediction(0)
+# On prédit les probabilités :
+y_pred = model.predict_proba(X_test)
+
+print("--- RÉSULTATS DU MODÈLE ---")
+print(f"Précision globale : {accuracy_score(y_test, y_pred):.2%}")
+print("\nRapport de classification :")
+print(classification_report(y_test, y_pred))
+
+# 7. ANALYSE : Quelle variable est la plus importante ?
+# C'est ici que vous verrez si votre variable 'cluster' est utile
+print("\nAffichage de l'importance des variables...")
+plt.figure(figsize=(10, 8))
+xgb.plot_importance(model, importance_type='weight', title='Importance des 13 variables')
+plt.show()
