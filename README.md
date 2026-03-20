@@ -42,6 +42,14 @@ Sinon, utilise `main.py` avec `--skip-clustering` (voir ci-dessous) si le fichie
 | `probabilite_par_minute.py` | Probabilités minute par minute + gain vs règle 30 min (lit `advanced_model_predictions.csv`). |
 | `main.py` | Enchaîne : clustering → modèle → probabilités (étapes 1/3, 2/3, 3/3). |
 
+### Évaluation sans fuite (important)
+
+- **`advanced_model_predictions.csv`** contient des prédictions **out-of-fold** (chaque ligne est prédite par un modèle **n’ayant pas** vu cette ligne à l’entraînement). On ne fait plus `fit` sur tout le jeu puis `predict` sur le même jeu.
+- Si la colonne **`alert_airport_id`** est présente, la validation utilise un **`GroupKFold`** : toutes les lignes d’une même alerte restent dans le même pli (évite la fuite entre lignes corrélées).
+- Pour **RF tuné** et **XGB tuné**, le tuning est fait **à l’intérieur de chaque pli train** (outer GroupKFold + inner `RandomizedSearchCV` avec `GroupKFold` sur les mêmes groupes), pas sur tout le dataset puis CV affichée.
+
+*Le clustering global (`clustering.py`) reste appris sur tout le jeu avant la régression : fuite transductive résiduelle possible sur `storm_type` ; une étape suivante serait un KMeans par pli ou sur train seulement.*
+
 ---
 
 ## Exécution recommandée (CSV déjà clusterisé)
