@@ -57,8 +57,16 @@ def run_probabilites(base_dir: pathlib.Path | None = None) -> None:
     print("  --------------|------------------------------------------")
     for pct in [70, 75, 80, 85, 88, 90, 92, 94, 95, 96, 97, 98, 99]:
         thresh = pct / 100.0
-        idx = np.searchsorted(median_probs, thresh)
-        minute = idx if idx <= MAX_MINUTE else int(MAX_MINUTE)
+        # Robustesse : on calcule la première minute pour chaque alerte,
+        # puis on prend la médiane des minutes (au lieu de la minute sur la courbe médiane).
+        # Ça évite les plateaux "même minute" quand la courbe médiane franchit tous les seuils
+        # très tôt à cause d'une sigma (incertitude) trop optimiste.
+        minute_per_alert = np.array(
+            [np.searchsorted(probs[i, :], thresh) for i in range(len(probs))],
+            dtype=int,
+        )
+        minute_per_alert = np.minimum(minute_per_alert, MAX_MINUTE)
+        minute = int(np.median(minute_per_alert))
         print(f"       {pct:2d}%       |       {minute:3d} min")
 
     # Before model vs with model: average and median time, then improvement

@@ -14,6 +14,19 @@ Pour **relancer le clustering** depuis `main.py` (graphiques + K-Means), install
 pip install seaborn matplotlib
 ```
 
+## Option : activer XGBoost
+
+Si tu veux que `modele.py` teste aussi `xgb_tuned` :
+
+Dans un environnement virtuel (recommandé) :
+```bash
+source .venv/bin/activate
+pip install xgboost
+```
+
+Sinon, `xgboost` n’est pas requis : le script affichera
+`(XGBoost non installé : pip install xgboost)` et passera au reste.
+
 Sinon, utilise `main.py` avec `--skip-clustering` (voir ci-dessous) si le fichier `alerts_with_clusters.csv` est déjà présent.
 
 ---

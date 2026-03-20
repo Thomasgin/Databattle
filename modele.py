@@ -102,15 +102,23 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         },
         n_iter=6,
         cv=cv_splits,
-        scoring="neg_mean_absolute_error",
+        scoring={"mae": "neg_mean_absolute_error", "rmse": "neg_root_mean_squared_error"},
+        refit="mae",
         random_state=RANDOM_STATE,
         n_jobs=OUTER_N_JOBS,
         verbose=0,
     )
     search.fit(X, y)
-    y_pred_tuned = cross_val_predict(search.best_estimator_, X, y, cv=kf, n_jobs=OUTER_N_JOBS)
-    rf_tuned_mae = mean_absolute_error(y, y_pred_tuned)
-    rf_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_tuned))
+    # RandomizedSearchCV fait déjà une validation croisée en interne.
+    # On évite un cross_val_predict supplémentaire (coûteux) en réutilisant les scores CV.
+    best_idx = search.best_index_
+    rf_tuned_mae = float(-search.best_score_)
+    # mean_test_rmse dépend du nom de la métrique.
+    rf_tuned_rmse = float(
+        -search.cv_results_.get("mean_test_rmse")[best_idx]
+        if "mean_test_rmse" in search.cv_results_
+        else np.nan
+    )
     results.append(("rf_tuned", rf_tuned_mae, rf_tuned_rmse))
     print(f"    -> rf_tuned terminé | MAE={rf_tuned_mae:.3f} RMSE={rf_tuned_rmse:.3f}")
 
@@ -136,14 +144,22 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
             },
             n_iter=6,
             cv=cv_splits,
-            scoring="neg_mean_absolute_error",
+            scoring={"mae": "neg_mean_absolute_error", "rmse": "neg_root_mean_squared_error"},
+            refit="mae",
             random_state=RANDOM_STATE,
             n_jobs=OUTER_N_JOBS,
             verbose=0,
         )
         search_xgb.fit(X, y)
-        y_pred_xgb = cross_val_predict(search_xgb.best_estimator_, X, y, cv=kf, n_jobs=OUTER_N_JOBS)
-        results.append(("xgb_tuned", mean_absolute_error(y, y_pred_xgb), np.sqrt(mean_squared_error(y, y_pred_xgb))))
+        best_idx_xgb = search_xgb.best_index_
+        xgb_tuned_mae = float(-search_xgb.best_score_)
+        xgb_tuned_rmse = float(
+            -search_xgb.cv_results_.get("mean_test_rmse")[best_idx_xgb]
+            if "mean_test_rmse" in search_xgb.cv_results_
+            else np.nan
+        )
+        results.append(("xgb_tuned", xgb_tuned_mae, xgb_tuned_rmse))
+        print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
         print("  (XGBoost non installé : pip install xgboost)")
     print("\n" + "=" * 55)
@@ -197,8 +213,9 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     else:
         best_final = search.best_estimator_
 
-    best_final.fit(X, y)
-    y_pred_final = best_final.predict(X)
+    # Pour que les probabilités (sigma) soient réalistes, on évite les résidus "in-sample".
+    # On produit des prédictions out-of-fold pour le meilleur modèle.
+    y_pred_final = cross_val_predict(best_final, X, y, cv=kf, n_jobs=OUTER_N_JOBS)
     preds_path = BASE_DIR / "advanced_model_predictions.csv"
     pd.DataFrame({"duration_true": y.astype(float), "duration_pred_best": y_pred_final}).to_csv(
         preds_path, index=False
