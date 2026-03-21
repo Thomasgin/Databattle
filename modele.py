@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import (
     GroupKFold,
@@ -13,6 +14,7 @@ from sklearn.model_selection import (
     cross_val_predict,
 )
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 try:
     from xgboost import XGBRegressor
@@ -116,6 +118,28 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     kf_shuffle = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
 
     results = []
+
+    # Baseline : régression linéaire (OLS) sur les mêmes features, même protocole OOF / groupes
+    print("  Régression linéaire (baseline)")
+    pipe_linear = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("model", LinearRegression()),
+        ]
+    )
+    if groups is not None:
+        gkf_lin = GroupKFold(n_splits=cv_splits)
+        y_pred_lr = cross_val_predict(
+            pipe_linear, X, y, cv=gkf_lin, groups=groups, n_jobs=OUTER_N_JOBS
+        )
+    else:
+        y_pred_lr = cross_val_predict(
+            pipe_linear, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+        )
+    lr_mae = mean_absolute_error(y, y_pred_lr)
+    lr_rmse = np.sqrt(mean_squared_error(y, y_pred_lr))
+    results.append(("linear_baseline", lr_mae, lr_rmse))
+    print(f"    -> linear_baseline terminé | MAE={lr_mae:.3f} RMSE={lr_rmse:.3f}")
 
     # RF défaut MODELE 1
 
@@ -232,6 +256,7 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     best_name, best_mae, best_rmse = min(results, key=lambda x: x[1])
 
     labels_fr = {
+        "linear_baseline": "Régression linéaire (baseline OLS + scaling)",
         "rf_default": "Random Forest (paramètres par défaut)",
         "rf_tuned": "Random Forest (hyperparamètres optimisés)",
         "xgb_tuned": "XGBoost (hyperparamètres optimisés)",
@@ -239,7 +264,7 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
 
     for name, mae, rmse in sorted(results, key=lambda x: x[1]):
         sous_10 = "  ✓ sous 10 min !" if mae < 10 else ""
-        print(f"  {name:12s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min{sous_10}")
+        print(f"  {name:18s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min{sous_10}")
     print("=" * 55)
     print(
         f"  Modèle retenu : {best_name} — {labels_fr.get(best_name, best_name)} "
@@ -252,7 +277,9 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         print(f"  Meilleur MAE : {best_mae:.2f} min. Descendre sous 10 min peut être limité par la variabilité météo.")
 
     # Prédictions pour probabilite_par_minute.py : uniquement OOF (jamais fit sur tout X puis predict(X))
-    if best_name == "rf_default":
+    if best_name == "linear_baseline":
+        y_pred_final = y_pred_lr
+    elif best_name == "rf_default":
         y_pred_final = y_pred
     elif best_name == "rf_tuned":
         y_pred_final = y_pred_tuned
