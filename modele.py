@@ -1,5 +1,6 @@
 import pathlib
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,9 @@ from sklearn.model_selection import (
     RandomizedSearchCV,
     cross_val_predict,
 )
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -21,6 +25,12 @@ try:
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
+
+try:
+    from catboost import CatBoostRegressor
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
 
 RANDOM_STATE = 42
 BASE_DIR = pathlib.Path(__file__).resolve().parent
@@ -77,13 +87,17 @@ def _resolve_csv_path(csv_path: str | None, use_enriched: bool) -> pathlib.Path:
     return BASE_DIR / "alerts_final_model.csv"
 
 
-def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
+def _load_xy(
+    csv_path: str | None,
+    use_enriched: bool,
+) -> tuple[pathlib.Path, pd.DataFrame, np.ndarray, np.ndarray | None, list[str]] | None:
+    """Charge CSV, construit X (dummies), y, groupes. Retourne None si erreur."""
     csv_file = _resolve_csv_path(csv_path, use_enriched)
     if not csv_file.exists():
         print(f"Fichier absent : {csv_file}")
         if use_enriched:
             print("  Lancer d'abord : python3 enrich_csv.py")
-        return
+        return None
 
     df = pd.read_csv(csv_file)
     if use_enriched and csv_path is None:
@@ -92,27 +106,100 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     target_col = next((c for c in TARGET_CANDIDATES if c in df.columns), None)
     if target_col is None:
         print("Colonne cible manquante. Cibles acceptées : duration_total_minutes ou duration_minutes")
-        return
+        return None
 
-    y = df[target_col].values
+    y = df[target_col].values.astype(float)
     feature_cols = [c for c in df.columns if c != target_col]
     X = df[feature_cols].copy()
 
-    # Groupes pour éviter que des lignes d'une même alerte soient éclatées train/val
-    groups: np.ndarray | None
     if GROUP_COL in df.columns:
         groups = df[GROUP_COL].values
         n_grp = len(np.unique(groups))
         print(
             f"  Validation par groupe ({GROUP_COL}) : {n_grp} groupes, {len(y)} lignes "
-            f"(GroupKFold {3} plis)."
+            f"(GroupKFold 3 plis)."
         )
     else:
         groups = None
         print("  Colonne groupe absente : KFold classique (risque de fuite si lignes corrélées).")
 
-    # Rend le script compatible avec des colonnes catégorielles (ex: airport, storm_type)
     X = pd.get_dummies(X, drop_first=False)
+    return csv_file, X, y, groups, feature_cols
+
+
+def _build_mlp_pipeline() -> Pipeline:
+    """
+    MLP : sklearn attend X et y à échelle comparable.
+    - StandardScaler sur les features
+    - TransformedTargetRegressor + StandardScaler sur y (sinon descente de gradient très instable)
+    """
+    mlp = MLPRegressor(
+        hidden_layer_sizes=(96, 48),
+        activation="relu",
+        solver="adam",
+        alpha=1e-3,
+        batch_size=64,
+        learning_rate_init=1e-3,
+        max_iter=1200,
+        shuffle=True,
+        early_stopping=True,
+        validation_fraction=0.12,
+        n_iter_no_change=30,
+        random_state=RANDOM_STATE,
+        tol=1e-4,
+    )
+    return Pipeline(
+        [
+            ("scaler_x", StandardScaler()),
+            (
+                "regressor",
+                TransformedTargetRegressor(
+                    regressor=mlp,
+                    transformer=StandardScaler(),
+                ),
+            ),
+        ]
+    )
+
+
+def run_mlp_only(csv_path: str | None = None, use_enriched: bool = False) -> None:
+    """CV out-of-fold sur le MLP uniquement (rapide à lancer pour tester)."""
+    print("Mode --mlp-only : MLP seul (OOF, même protocole que le pipeline complet).\n")
+    loaded = _load_xy(csv_path, use_enriched)
+    if loaded is None:
+        return
+    csv_file, X, y, groups, feature_cols = loaded
+    cv_splits = 3
+    kf_shuffle = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+    pipe_mlp = _build_mlp_pipeline()
+    print("  MLP (X + y standardisés, TransformedTargetRegressor)…")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        if groups is not None:
+            y_pred = cross_val_predict(
+                pipe_mlp,
+                X,
+                y,
+                cv=GroupKFold(n_splits=cv_splits),
+                groups=groups,
+                n_jobs=OUTER_N_JOBS,
+            )
+        else:
+            y_pred = cross_val_predict(
+                pipe_mlp, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+            )
+    mae = mean_absolute_error(y, y_pred)
+    rmse = np.sqrt(mean_squared_error(y, y_pred))
+    print(f"\n  Fichier : {csv_file.name}")
+    print(f"  Lignes : {len(y)}  |  Colonnes features (dummies) : {X.shape[1]}")
+    print(f"  mlp_dense  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min")
+
+
+def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
+    loaded = _load_xy(csv_path, use_enriched)
+    if loaded is None:
+        return
+    csv_file, X, y, groups, feature_cols = loaded
 
     cv_splits = 3
     kf_shuffle = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
@@ -246,6 +333,82 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
         print("  (XGBoost non installé : pip install xgboost)")
+
+    # CatBoost tuné si dispo (même X numérique après get_dummies que les autres modèles)
+    print("  CatBoost tuned MODELE 4")
+
+    y_pred_cat: np.ndarray | None = None
+    if HAS_CATBOOST:
+        print("  Tuning CatBoost (OOF + groupes si disponibles)...")
+        pipe_cat = Pipeline(
+            [
+                (
+                    "model",
+                    CatBoostRegressor(
+                        random_seed=RANDOM_STATE,
+                        verbose=False,
+                        loss_function="MAE",
+                        thread_count=1,
+                    ),
+                ),
+            ]
+        )
+        inner_cv_cat: GroupKFold | KFold = (
+            GroupKFold(n_splits=cv_splits)
+            if groups is not None
+            else KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+        )
+        search_cat_template = RandomizedSearchCV(
+            pipe_cat,
+            param_distributions={
+                "model__iterations": [400, 600, 900],
+                "model__depth": [4, 6, 8, 10],
+                "model__learning_rate": [0.03, 0.05, 0.08],
+                "model__l2_leaf_reg": [1, 3, 7, 10],
+                "model__subsample": [0.8, 1.0],
+                "model__border_count": [128, 254],
+            },
+            n_iter=6,
+            cv=inner_cv_cat,
+            scoring="neg_mean_absolute_error",
+            random_state=RANDOM_STATE,
+            n_jobs=OUTER_N_JOBS,
+            verbose=0,
+        )
+        if groups is not None:
+            y_pred_cat = _oof_grouped_search_predict(
+                search_cat_template, X, y, groups, cv_splits
+            )
+        else:
+            y_pred_cat = cross_val_predict(
+                search_cat_template, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+            )
+        cat_mae = mean_absolute_error(y, y_pred_cat)
+        cat_rmse = np.sqrt(mean_squared_error(y, y_pred_cat))
+        results.append(("catboost_tuned", cat_mae, cat_rmse))
+        print(f"    -> catboost_tuned terminé | MAE={cat_mae:.3f} RMSE={cat_rmse:.3f}")
+    else:
+        print("  (CatBoost non installé : pip install catboost)")
+
+    # MLP : X et y standardisés (voir _build_mlp_pipeline)
+    print("  MLP (réseau dense sklearn, X+y scalés)")
+    pipe_mlp = _build_mlp_pipeline()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        if groups is not None:
+            gkf_mlp = GroupKFold(n_splits=cv_splits)
+            y_pred_mlp = cross_val_predict(
+                pipe_mlp, X, y, cv=gkf_mlp, groups=groups, n_jobs=OUTER_N_JOBS
+            )
+        else:
+            y_pred_mlp = cross_val_predict(
+                pipe_mlp, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+            )
+    mlp_mae = mean_absolute_error(y, y_pred_mlp)
+    mlp_rmse = np.sqrt(mean_squared_error(y, y_pred_mlp))
+    results.append(("mlp_dense", mlp_mae, mlp_rmse))
+    print(f"    -> mlp_dense terminé | MAE={mlp_mae:.3f} RMSE={mlp_rmse:.3f}")
+
     print("\n" + "=" * 55)
     print("  " + csv_file.name + f" – Résultats (CV {cv_splits}-fold)")
     print("=" * 55)
@@ -260,6 +423,8 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         "rf_default": "Random Forest (paramètres par défaut)",
         "rf_tuned": "Random Forest (hyperparamètres optimisés)",
         "xgb_tuned": "XGBoost (hyperparamètres optimisés)",
+        "catboost_tuned": "CatBoost (hyperparamètres optimisés)",
+        "mlp_dense": "MLP (dense, X+y standardisés)",
     }
 
     for name, mae, rmse in sorted(results, key=lambda x: x[1]):
@@ -285,6 +450,10 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         y_pred_final = y_pred_tuned
     elif best_name == "xgb_tuned" and y_pred_xgb is not None:
         y_pred_final = y_pred_xgb
+    elif best_name == "catboost_tuned" and y_pred_cat is not None:
+        y_pred_final = y_pred_cat
+    elif best_name == "mlp_dense":
+        y_pred_final = y_pred_mlp
     else:
         y_pred_final = y_pred
 
@@ -310,5 +479,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Utilise le CSV enrichi (si --csv non fourni).",
     )
+    parser.add_argument(
+        "--mlp-only",
+        action="store_true",
+        help="N'évalue que le MLP (CV OOF), pour test rapide.",
+    )
     args = parser.parse_args()
-    run_model(csv_path=args.csv, use_enriched=args.enriched)
+    if args.mlp_only:
+        run_mlp_only(csv_path=args.csv, use_enriched=args.enriched)
+    else:
+        run_model(csv_path=args.csv, use_enriched=args.enriched)
