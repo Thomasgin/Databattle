@@ -1,6 +1,8 @@
 import pathlib
 import os
 import warnings
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -25,6 +27,7 @@ try:
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
+    XGBRegressor = None
 
 try:
     from catboost import CatBoostRegressor
@@ -42,6 +45,53 @@ CPU_COUNT = os.cpu_count() or 2
 OUTER_N_JOBS = 1
 
 GROUP_COL = "alert_airport_id"
+
+
+def _resolve_xgboost_choice(xgboost_mode: str) -> bool:
+    """
+    Détermine si XGBoost doit être testé :
+    - on  : toujours activé
+    - off : toujours désactivé
+    - ask : demande utilisateur si terminal interactif, sinon désactivé
+    """
+    mode = xgboost_mode.lower()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+
+    if sys.stdin.isatty():
+        print("\n  Option XGBoost : ce test peut allonger fortement le temps d'exécution.")
+        choice = input("  Tester XGBoost ? [y/N] : ").strip().lower()
+        return choice in {"y", "yes", "o", "oui"}
+    print("  Mode non interactif : XGBoost désactivé (xgboost_mode=ask).")
+    return False
+
+
+def _ensure_xgboost() -> bool:
+    """
+    Vérifie que xgboost est disponible.
+    Si absent, tente une installation automatique via pip.
+    """
+    global HAS_XGB, XGBRegressor
+    if HAS_XGB:
+        return True
+
+    print("  XGBoost non détecté. Installation automatique en cours (pip install xgboost)...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "xgboost"],
+            check=True,
+        )
+        from xgboost import XGBRegressor as _XGBRegressor
+    except Exception as exc:
+        print(f"  Echec installation xgboost: {exc}")
+        return False
+
+    XGBRegressor = _XGBRegressor
+    HAS_XGB = True
+    print("  XGBoost installé avec succès.")
+    return True
 
 
 def _oof_grouped_search_predict(
@@ -195,7 +245,15 @@ def run_mlp_only(csv_path: str | None = None, use_enriched: bool = False) -> Non
     print(f"  mlp_dense  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min")
 
 
-def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
+def run_model(
+    csv_path: str | None = None,
+    use_enriched: bool = False,
+    xgboost_mode: str = "ask",
+) -> None:
+    use_xgboost = _resolve_xgboost_choice(xgboost_mode)
+    if use_xgboost:
+        _ensure_xgboost()
+
     loaded = _load_xy(csv_path, use_enriched)
     if loaded is None:
         return
@@ -258,15 +316,20 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         inner_cv_rf = GroupKFold(n_splits=cv_splits)
     else:
         inner_cv_rf = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+    # Espace de recherche élargi et plus stable que la version initiale :
+    # - davantage de candidats utiles
+    # - contrôle de complexité (split/leaf) pour limiter le sur-apprentissage
     search_rf_template = RandomizedSearchCV(
         pipe_tuned,
         param_distributions={
-            "model__n_estimators": [120, 200, 300],
-            "model__max_depth": [None, 15, 25],
-            "model__min_samples_leaf": [1, 2, 3],
-            "model__max_features": ["sqrt", 0.4, 0.6],
+            "model__n_estimators": [120, 200, 300, 500],
+            "model__max_depth": [None, 10, 15, 25, 35],
+            "model__min_samples_split": [2, 5, 10],
+            "model__min_samples_leaf": [1, 2, 4],
+            "model__max_features": ["sqrt", "log2", 0.4, 0.6, 0.8],
+            "model__bootstrap": [True, False],
         },
-        n_iter=6,
+        n_iter=24,
         cv=inner_cv_rf,
         scoring="neg_mean_absolute_error",
         random_state=RANDOM_STATE,
@@ -292,7 +355,7 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
     print("  XGBoost tuned MODELE 3")
 
     y_pred_xgb: np.ndarray | None = None
-    if HAS_XGB:
+    if use_xgboost and HAS_XGB:
         print("  Tuning XGBoost (OOF + groupes si disponibles)...")
         pipe_xgb = Pipeline([
             ("model", XGBRegressor(random_state=RANDOM_STATE, n_jobs=1)),
@@ -332,7 +395,10 @@ def run_model(csv_path: str | None = None, use_enriched: bool = False) -> None:
         results.append(("xgb_tuned", xgb_tuned_mae, xgb_tuned_rmse))
         print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
-        print("  (XGBoost non installé : pip install xgboost)")
+        if use_xgboost:
+            print("  (XGBoost non installé : pip install xgboost)")
+        else:
+            print("  (XGBoost désactivé par l'utilisateur)")
 
     # CatBoost tuné si dispo (même X numérique après get_dummies que les autres modèles)
     print("  CatBoost tuned MODELE 4")
@@ -484,8 +550,14 @@ if __name__ == "__main__":
         action="store_true",
         help="N'évalue que le MLP (CV OOF), pour test rapide.",
     )
+    parser.add_argument(
+        "--xgboost",
+        choices=["ask", "on", "off"],
+        default="ask",
+        help="Active XGBoost: ask (demande), on (force), off (désactive).",
+    )
     args = parser.parse_args()
     if args.mlp_only:
         run_mlp_only(csv_path=args.csv, use_enriched=args.enriched)
     else:
-        run_model(csv_path=args.csv, use_enriched=args.enriched)
+        run_model(csv_path=args.csv, use_enriched=args.enriched, xgboost_mode=args.xgboost)

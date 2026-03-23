@@ -23,6 +23,12 @@ def main() -> None:
         action="store_true",
         help="N'exécute pas probabilite_par_minute.py après le modèle.",
     )
+    parser.add_argument(
+        "--xgboost",
+        choices=["ask", "on", "off"],
+        default="ask",
+        help="Active XGBoost pour le modèle: ask (demande), on (force), off (désactive).",
+    )
     args = parser.parse_args()
 
     base_dir = pathlib.Path(__file__).resolve().parent
@@ -65,7 +71,7 @@ def main() -> None:
         )
 
     print(f"[2/3] Modèle de régression sur: {out_csv}")
-    run_model(csv_path=str(out_csv), use_enriched=False)
+    run_model(csv_path=str(out_csv), use_enriched=False, xgboost_mode=args.xgboost)
 
     if not args.skip_probabilites:
         print("[3/3] Probabilités par minute (terminal)...")
