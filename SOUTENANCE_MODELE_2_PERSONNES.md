@@ -236,3 +236,90 @@ Ces points prennent 20-30 secondes chacun si le jury demande plus de detail.
 - [ ] Citer la **limite principale** (clustering global en amont).
 - [ ] Ajouter la phrase **empreinte carbone** (sobriete de calcul).
 
+
+----------------------------------------------------------------------------------------------------------
+
+1) Partie clustering : ce qu’on fait exactement
+Le clustering sert à structurer les alertes avant la prédiction.
+
+a) Données d’entrée
+On part d’un tableau d’alertes (alerts_preprocessed.csv) avec des variables météo (nombre d’éclairs, distance, amplitude, ratios, etc.).
+
+b) Feature engineering (dans clustering.py)
+Le script crée des variables utiles :
+
+speed = vitesse de déplacement approximée (lat_delta, lon_delta)
+storm_surface = surface approximative (lat_std * lon_std)
+hour_sin, hour_cos = encodage cyclique de l’heure (important car 23h et 0h sont proches)
+log_* sur certaines variables (n_lightnings, lightning_per_minute, storm_surface) pour réduire l’effet des valeurs extrêmes
+clipping de certaines colonnes au 99e percentile
+c) Clustering
+Standardisation des variables
+KMeans(n_clusters=4)
+d) Sortie clustering
+Le résultat principal est une nouvelle colonne :
+
+storm_type (cluster 0,1,2,3)
+Interprétation :
+
+ce n’est pas une “vérité physique absolue”, mais une typologie statistique d’orages similaires.
+2) Partie modèle : ce qu’on prédit exactement
+Le modèle prédit une durée en minutes (variable continue), donc c’est de la régression.
+
+a) Variable cible (output)
+priorité : duration_total_minutes
+sinon : duration_minutes
+b) Variables explicatives (features)
+Le script prend toutes les colonnes sauf la cible, dont :
+
+les variables météo/tabulaires
+storm_type issu du clustering
+éventuelles colonnes catégorielles encodées avec pd.get_dummies(...)
+Donc oui : le clustering alimente le modèle via storm_type.
+
+3) Quels modèles sont entraînés ?
+Dans modele.py, on compare :
+
+linear_baseline : StandardScaler + LinearRegression
+rf_default : Random Forest standard
+rf_tuned : Random Forest avec RandomizedSearchCV
+xgb_tuned : XGBoost avec RandomizedSearchCV (si XGBoost installé)
+L’idée : partir d’une baseline simple puis comparer avec des modèles plus puissants non-linéaires.
+
+4) Comment on évalue (point important à expliquer au jury)
+On veut éviter les résultats “trop beaux” dus à la fuite de données.
+
+a) Out-of-fold (OOF)
+Chaque ligne est prédite par un modèle qui ne l’a jamais vue pendant son entraînement.
+
+b) GroupKFold si possible
+Si alert_airport_id existe, les lignes d’une même alerte restent dans le même pli (pas de mélange train/validation).
+
+c) Tuning propre
+Pour les modèles “tuned”, la recherche d’hyperparamètres se fait dans les plis d’entraînement (nested logique), pas sur tout le dataset.
+
+5) Comment le meilleur modèle est choisi ?
+Le script calcule pour chaque modèle :
+
+MAE (erreur absolue moyenne, en minutes)
+RMSE (pénalise plus les grosses erreurs)
+Puis il choisit le meilleur avec :
+
+MAE minimale (best_name)
+Pourquoi MAE ?
+Parce que c’est le plus lisible métier : “en moyenne, on se trompe de X minutes”.
+
+6) Sortie concrète du modèle
+Fichier généré :
+
+advanced_model_predictions.csv
+Colonnes principales :
+
+duration_true : durée réelle
+duration_pred_best : prédiction OOF du meilleur modèle
+Ce fichier est ensuite utilisé par la suite du projet (probabilités / aide à la décision).
+
+Phrase “ultra claire” à dire à quelqu’un qui découvre
+“On commence par regrouper les alertes en 4 types d’orages avec un clustering, puis on utilise ce type et les variables météo dans plusieurs modèles de régression pour prédire la durée de l’alerte en minutes ; enfin on garde automatiquement le modèle qui a la plus faible erreur MAE en validation croisée.”
+
+
