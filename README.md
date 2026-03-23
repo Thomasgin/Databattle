@@ -1,132 +1,159 @@
-# Data Battle – Clustering + modèle de régression
+# Data Battle 2026 - Pipeline prédiction de durée d'alerte
+
+Ce projet exécute une chaîne en 3 étapes :
+1. **Clustering** des alertes météo (création de `storm_type`).
+2. **Régression** de la durée d'alerte (`duration_total_minutes` ou `duration_minutes`).
+3. **Aide à la décision** minute par minute (probabilité de fin d'alerte).
+
+Le point d'entrée recommandé est `main.py`, qui orchestre ces 3 étapes.
+
+---
+
+## Objectif
+
+Prédire la durée d'une alerte orageuse et comparer une levée basée modèle à la règle opérationnelle "30 minutes après le dernier éclair".
+
+Sorties principales :
+- `alerts_with_clusters.csv` : données enrichies avec `storm_type` (sortie clustering).
+- `advanced_model_predictions.csv` : prédictions **out-of-fold** du meilleur modèle (sortie régression).
+- sortie terminal de `probabilite_par_minute.py` : minute recommandée selon un seuil de confiance.
+
+---
 
 ## Prérequis
 
-Dans le dossier du projet :
+Depuis la racine du projet :
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Pour **relancer le clustering** depuis `main.py` (graphiques + K-Means), installe aussi :
+Le `requirements.txt` inclut :
+- `numpy`
+- `pandas`
+- `scikit-learn`
+- `xgboost`
+- `matplotlib`
+- `seaborn`
 
-```bash
-pip install seaborn matplotlib
-```
-
-## Option : activer XGBoost
-
-Si tu veux que `modele.py` teste aussi `xgb_tuned` :
-
-Dans un environnement virtuel (recommandé) :
-```bash
-source .venv/bin/activate
-pip install xgboost
-```
-
-Sinon, `xgboost` n’est pas requis : le script affichera
-`(XGBoost non installé : pip install xgboost)` et passera au reste.
-
-Sinon, utilise `main.py` avec `--skip-clustering` (voir ci-dessous) si le fichier `alerts_with_clusters.csv` est déjà présent.
+> Remarque : si `xgboost` n'est pas installé, `modele.py` continue avec les autres modèles et affiche un message d'information.
 
 ---
 
-## Fichiers importants
+## Structure des fichiers
 
 | Fichier | Rôle |
-|---------|------|
-| `alerts_preprocessed.csv` | Entrée du clustering (une ligne = une alerte). |
-| `alerts_with_clusters.csv` | Sortie du clustering (alertes + colonne `storm_type`). |
-| `clustering.py` | Nettoyage + K-Means + visualisations (ne pas modifier si imposé). |
-| `modele.py` | Baseline régression linéaire (OLS + scaling), Random Forest (défaut + tuné), XGBoost si installé ; génère `advanced_model_predictions.csv`. |
-| `probabilite_par_minute.py` | Probabilités minute par minute + gain vs règle 30 min (lit `advanced_model_predictions.csv`). |
-| `main.py` | Enchaîne : clustering → modèle → probabilités (étapes 1/3, 2/3, 3/3). |
-
-### Évaluation sans fuite (important)
-
-- **`advanced_model_predictions.csv`** contient des prédictions **out-of-fold** (chaque ligne est prédite par un modèle **n’ayant pas** vu cette ligne à l’entraînement). On ne fait plus `fit` sur tout le jeu puis `predict` sur le même jeu.
-- Si la colonne **`alert_airport_id`** est présente, la validation utilise un **`GroupKFold`** : toutes les lignes d’une même alerte restent dans le même pli (évite la fuite entre lignes corrélées).
-- Pour **RF tuné** et **XGB tuné**, le tuning est fait **à l’intérieur de chaque pli train** (outer GroupKFold + inner `RandomizedSearchCV` avec `GroupKFold` sur les mêmes groupes), pas sur tout le dataset puis CV affichée.
-
-*Le clustering global (`clustering.py`) reste appris sur tout le jeu avant la régression : fuite transductive résiduelle possible sur `storm_type` ; une étape suivante serait un KMeans par pli ou sur train seulement.*
+|---|---|
+| `main.py` | Pipeline principal : clustering -> modèle -> probabilités |
+| `clustering.py` | Prétraitement + K-Means (4 clusters) + visualisations |
+| `modele.py` | Entraînement/évaluation de plusieurs modèles de régression |
+| `probabilite_par_minute.py` | Conversion des prédictions en probas et comparaison avec la règle 30 min |
+| `alerts_preprocessed.csv` | Entrée attendue du clustering |
+| `alerts_with_clusters.csv` | Sortie du clustering, entrée du modèle |
+| `advanced_model_predictions.csv` | Prédictions finales out-of-fold du meilleur modèle |
 
 ---
 
-## Ouverture du projet — LSTM et données séquentielles
+## Détail du pipeline
 
-Aujourd’hui, `modele.py` travaille sur des **vecteurs tabulaires** (une ligne = alerte ou segment avec des **agrégats** : moyennes, ratios, etc.). Les modèles comparés sont donc adaptés à ce format : **régression linéaire**, **Random Forest**, **XGBoost** (éventuellement plus tard **MLP** sur le même vecteur).
+### 1) Clustering (`clustering.py`)
 
-**LSTM** (*Long Short-Term Memory*) est pensé pour des **séquences ordonnées** (dépendance au **temps** ou à l’**ordre des événements**), pas pour un simple vecteur de features par ligne.
+Entrée : `alerts_preprocessed.csv` (ou fichier fourni via `--input` dans `main.py`).
 
-**Piste future crédible :** reconstruire, pour chaque `alert_airport_id`, une **séquence** au fil du temps — par exemple une ligne par **minute** ou par **éclair** (débit, distance, type CG/IC, etc.) — puis :
+Traitements effectués :
+- feature engineering : `speed`, `storm_surface`
+- encodage cyclique : `hour_sin`, `hour_cos`
+- transformations logarithmiques : `log_n_lightnings`, `log_lightning_per_minute`, `log_storm_surface`
+- clipping de certaines variables extrêmes (quantile 99%)
+- standardisation puis `KMeans(n_clusters=4)`
 
-1. **Aligner / padding** des séquences (longueurs variables) ;
-2. Entraîner un **LSTM** (ou GRU) pour prédire la **durée restante** ou la **fin d’alerte** à partir du début (ou au fil de l’eau) ;
-3. Garder le **même protocole d’évaluation** (split par groupe = alerte, pas de fuite temporelle si on prédit le futur à partir du passé).
+Sorties :
+- ajout de la colonne `storm_type`
+- sauvegarde de `cluster_analysis.png`
+- génération de `alerts_with_clusters.csv` (quand exécuté en script direct)
 
-Cela constitue un **autre paradigme** (séquentiel vs tabulaire) et une **vraie justification** d’utiliser un LSTM, plutôt que de l’appliquer à plat sur les colonnes actuelles.
+### 2) Modélisation (`modele.py`)
 
-*Prochaines étapes envisagées côté modèles : ajout d’un **MLP** sur les features actuelles pour une 4ᵉ famille « réseau de neurones dense », puis des **graphiques** de comparaison des métriques / résidus.*
+Colonne cible acceptée :
+- `duration_total_minutes` (prioritaire), sinon `duration_minutes`.
+
+Modèles évalués :
+- `linear_baseline` : régression linéaire + standardisation
+- `rf_default` : Random Forest (paramètres par défaut du script)
+- `rf_tuned` : Random Forest + `RandomizedSearchCV`
+- `xgb_tuned` : XGBoost + `RandomizedSearchCV` (si disponible)
+
+Sélection finale : modèle avec **MAE minimale**.
+
+Sortie :
+- `advanced_model_predictions.csv` avec :
+  - `duration_true`
+  - `duration_pred_best`
+
+### 3) Probabilités (`probabilite_par_minute.py`)
+
+Le script lit `advanced_model_predictions.csv` (ou fallback `model_validation_predictions.csv`), estime l'incertitude via l'écart-type des résidus, puis :
+- calcule \( P(\text{fin avant } t) \) pour `t = 0..120`
+- affiche la minute médiane de levée pour des seuils 70% à 99%
+- compare :
+  - **avant modèle** : `duration_true + 30`
+  - **avec modèle** : première minute où \(P \ge 95\%\)
+- affiche le gain moyen/médian (minutes gagnées ou perdues)
 
 ---
 
-## Exécution recommandée (CSV déjà clusterisé)
+## Évaluation et risque de fuite de données
 
-La plus simple si `alerts_with_clusters.csv` existe déjà :
+Points robustes déjà en place :
+- prédictions finales en **out-of-fold** (pas de `fit` sur tout le jeu puis `predict` sur ce même jeu)
+- si `alert_airport_id` existe : validation en **GroupKFold** pour garder une alerte entière dans un seul pli
+- pour `rf_tuned`/`xgb_tuned` : tuning fait à l'intérieur des plis d'entraînement (logique de nested CV)
+
+Limite actuelle :
+- le clustering est appris globalement avant la régression, ce qui peut introduire une fuite transductive via `storm_type`.
+
+---
+
+## Commandes d'exécution
+
+### Pipeline complet (recommandé)
 
 ```bash
-cd /chemin/vers/Databattle
+python3 main.py
+```
+
+### Pipeline sans relancer le clustering
+
+```bash
 python3 main.py --skip-clustering
 ```
 
-Pour **ne pas** lancer l’affichage des probabilités après le modèle :
+Précondition : `alerts_with_clusters.csv` doit déjà exister.
+
+### Pipeline sans étape probabilités
 
 ```bash
 python3 main.py --skip-clustering --skip-probabilites
 ```
 
----
-
-## Exécution complète (clustering + modèle + probabilités)
-
-1. Avoir `alerts_preprocessed.csv` à la racine du projet.
-2. Installer `seaborn` et `matplotlib` (voir prérequis).
-3. Lancer :
+### Spécifier un CSV d'entrée pour le clustering
 
 ```bash
-cd /chemin/vers/Databattle
-python3 main.py
+python3 main.py --input mon_fichier.csv
 ```
 
-À la fin, le modèle écrit `advanced_model_predictions.csv`, puis `main.py` appelle `probabilite_par_minute.py` (sortie terminal uniquement).
-
----
-
-## Probabilités seules (si le modèle a déjà tourné)
-
-```bash
-python3 probabilite_par_minute.py
-```
-
----
-
-## Modèle seul (sans passer par `main.py`)
-
-Avec le CSV des clusters :
+### Modèle seul
 
 ```bash
 python3 modele.py --csv alerts_with_clusters.csv
 ```
 
-Sans `--csv` : le script cherche d’abord `alerts_with_clusters.csv`, puis les autres CSV du projet selon la config.
+Ou, sans `--csv`, le script cherche automatiquement (dans cet ordre) :
+1. `alerts_with_clusters.csv`
+2. si `--enriched` : `alerts_final_model_17var.csv`, puis `alerts_final_model_enriched.csv`
+3. sinon : `alerts_final_model.csv`
 
-Avec les données enrichies (si ces fichiers existent) :
-
-```bash
-python3 modele.py --enriched
-```
-
-Ensuite, pour les probabilités :
+### Probabilités seules
 
 ```bash
 python3 probabilite_par_minute.py
@@ -134,7 +161,22 @@ python3 probabilite_par_minute.py
 
 ---
 
-## Résolution de problèmes
+## Erreurs fréquentes et solutions
 
-- **`ModuleNotFoundError: seaborn`** : `pip install seaborn matplotlib` **ou** `python3 main.py --skip-clustering` si `alerts_with_clusters.csv` existe.
-- **`alerts_with_clusters.csv` introuvable** : lancer d’abord le clustering (`python3 main.py` sans `--skip-clustering`) ou régénérer ce fichier.
+- **`FileNotFoundError` sur `alerts_with_clusters.csv`**
+  - lancer `python3 main.py` (sans `--skip-clustering`) ou exécuter `clustering.py` avant.
+
+- **Dépendances graphiques manquantes (`matplotlib`/`seaborn`)**
+  - installer via `pip install -r requirements.txt`
+  - ou lancer `python3 main.py --skip-clustering` si `alerts_with_clusters.csv` existe déjà.
+
+- **Colonne cible absente**
+  - le CSV modèle doit contenir `duration_total_minutes` ou `duration_minutes`.
+
+---
+
+## Reproductibilité
+
+- graine fixée à `42` dans les scripts principaux.
+- validation croisée à 3 plis.
+- exécution volontairement séquentielle (`n_jobs=1` côté CV/modèles) pour limiter les blocages CPU/RAM.
