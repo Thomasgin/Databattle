@@ -3,6 +3,7 @@ import os
 import warnings
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -212,6 +213,42 @@ def _build_mlp_pipeline() -> Pipeline:
     )
 
 
+def _extract_feature_importance(
+    model_name: str,
+    fitted_obj,
+    feature_names: list[str],
+) -> pd.DataFrame | None:
+    """
+    Retourne un DataFrame d'importance des variables pour le modèle fourni.
+    """
+    if model_name == "linear_baseline":
+        coefs = fitted_obj.named_steps["model"].coef_
+        importances = np.abs(np.asarray(coefs, dtype=float))
+    elif model_name in {"rf_default", "rf_tuned", "xgb_tuned", "catboost_tuned"}:
+        if model_name in {"rf_tuned", "xgb_tuned", "catboost_tuned"}:
+            # RandomizedSearchCV -> best_estimator_ est un Pipeline
+            fitted_pipe = fitted_obj.best_estimator_
+        else:
+            fitted_pipe = fitted_obj
+        model = fitted_pipe.named_steps["model"]
+        if not hasattr(model, "feature_importances_"):
+            return None
+        importances = np.asarray(model.feature_importances_, dtype=float)
+    else:
+        return None
+
+    if importances.size != len(feature_names):
+        return None
+
+    df_imp = pd.DataFrame(
+        {
+            "feature": feature_names,
+            "importance": importances,
+        }
+    ).sort_values("importance", ascending=False)
+    return df_imp
+
+
 def run_mlp_only(csv_path: str | None = None, use_enriched: bool = False) -> None:
     """CV out-of-fold sur le MLP uniquement (rapide à lancer pour tester)."""
     print("Mode --mlp-only : MLP seul (OOF, même protocole que le pipeline complet).\n")
@@ -250,6 +287,7 @@ def run_model(
     use_enriched: bool = False,
     xgboost_mode: str = "ask",
 ) -> None:
+    run_start = time.perf_counter()
     use_xgboost = _resolve_xgboost_choice(xgboost_mode)
     if use_xgboost:
         _ensure_xgboost()
@@ -263,9 +301,12 @@ def run_model(
     kf_shuffle = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
 
     results = []
+    model_times_s: dict[str, float] = {}
+    fitted_artifacts: dict[str, object] = {}
 
     # Baseline : régression linéaire (OLS) sur les mêmes features, même protocole OOF / groupes
     print("  Régression linéaire (baseline)")
+    t0 = time.perf_counter()
     pipe_linear = Pipeline(
         [
             ("scaler", StandardScaler()),
@@ -284,11 +325,13 @@ def run_model(
     lr_mae = mean_absolute_error(y, y_pred_lr)
     lr_rmse = np.sqrt(mean_squared_error(y, y_pred_lr))
     results.append(("linear_baseline", lr_mae, lr_rmse))
+    model_times_s["linear_baseline"] = time.perf_counter() - t0
     print(f"    -> linear_baseline terminé | MAE={lr_mae:.3f} RMSE={lr_rmse:.3f}")
 
     # RF défaut MODELE 1
 
     print("  Random forest default MODELE 1")
+    t0 = time.perf_counter()
     rf_estimators = 120
     pipe_rf = Pipeline([
         ("model", RandomForestRegressor(n_estimators=rf_estimators, max_depth=None, random_state=RANDOM_STATE, n_jobs=1)),
@@ -303,11 +346,13 @@ def run_model(
     rf_default_mae = mean_absolute_error(y, y_pred)
     rf_default_rmse = np.sqrt(mean_squared_error(y, y_pred))
     results.append(("rf_default", rf_default_mae, rf_default_rmse))  # calcul du MAE et RMSE
+    model_times_s["rf_default"] = time.perf_counter() - t0
     print(f"    -> rf_default terminé | MAE={rf_default_mae:.3f} RMSE={rf_default_rmse:.3f}")
 
     # Random forest tuned MODELE 2
 
     print("  Random forest tuned MODELE 2")
+    t0 = time.perf_counter()
     pipe_tuned = Pipeline([
         ("model", RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=1)),
     ])
@@ -348,6 +393,7 @@ def run_model(
     rf_tuned_mae = mean_absolute_error(y, y_pred_tuned)
     rf_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_tuned))
     results.append(("rf_tuned", rf_tuned_mae, rf_tuned_rmse))
+    model_times_s["rf_tuned"] = time.perf_counter() - t0
     print(f"    -> rf_tuned terminé | MAE={rf_tuned_mae:.3f} RMSE={rf_tuned_rmse:.3f}")
 
     # XGBoost tuné si dispo MODELE 3
@@ -357,6 +403,7 @@ def run_model(
     y_pred_xgb: np.ndarray | None = None
     if use_xgboost and HAS_XGB:
         print("  Tuning XGBoost (OOF + groupes si disponibles)...")
+        t0 = time.perf_counter()
         pipe_xgb = Pipeline([
             ("model", XGBRegressor(random_state=RANDOM_STATE, n_jobs=1)),
         ])
@@ -393,6 +440,7 @@ def run_model(
         xgb_tuned_mae = mean_absolute_error(y, y_pred_xgb)
         xgb_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_xgb))
         results.append(("xgb_tuned", xgb_tuned_mae, xgb_tuned_rmse))
+        model_times_s["xgb_tuned"] = time.perf_counter() - t0
         print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
         if use_xgboost:
@@ -406,6 +454,7 @@ def run_model(
     y_pred_cat: np.ndarray | None = None
     if HAS_CATBOOST:
         print("  Tuning CatBoost (OOF + groupes si disponibles)...")
+        t0 = time.perf_counter()
         pipe_cat = Pipeline(
             [
                 (
@@ -452,12 +501,14 @@ def run_model(
         cat_mae = mean_absolute_error(y, y_pred_cat)
         cat_rmse = np.sqrt(mean_squared_error(y, y_pred_cat))
         results.append(("catboost_tuned", cat_mae, cat_rmse))
+        model_times_s["catboost_tuned"] = time.perf_counter() - t0
         print(f"    -> catboost_tuned terminé | MAE={cat_mae:.3f} RMSE={cat_rmse:.3f}")
     else:
         print("  (CatBoost non installé : pip install catboost)")
 
     # MLP : X et y standardisés (voir _build_mlp_pipeline)
     print("  MLP (réseau dense sklearn, X+y scalés)")
+    t0 = time.perf_counter()
     pipe_mlp = _build_mlp_pipeline()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ConvergenceWarning)
@@ -473,6 +524,7 @@ def run_model(
     mlp_mae = mean_absolute_error(y, y_pred_mlp)
     mlp_rmse = np.sqrt(mean_squared_error(y, y_pred_mlp))
     results.append(("mlp_dense", mlp_mae, mlp_rmse))
+    model_times_s["mlp_dense"] = time.perf_counter() - t0
     print(f"    -> mlp_dense terminé | MAE={mlp_mae:.3f} RMSE={mlp_rmse:.3f}")
 
     print("\n" + "=" * 55)
@@ -495,7 +547,11 @@ def run_model(
 
     for name, mae, rmse in sorted(results, key=lambda x: x[1]):
         sous_10 = "  ✓ sous 10 min !" if mae < 10 else ""
-        print(f"  {name:18s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min{sous_10}")
+        t_model = model_times_s.get(name, 0.0)
+        print(
+            f"  {name:18s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min"
+            f"   Temps={t_model:.1f}s{sous_10}"
+        )
     print("=" * 55)
     print(
         f"  Modèle retenu : {best_name} — {labels_fr.get(best_name, best_name)} "
@@ -506,6 +562,14 @@ def run_model(
         print("  Objectif < 10 min MAE atteint.")
     else:
         print(f"  Meilleur MAE : {best_mae:.2f} min. Descendre sous 10 min peut être limité par la variabilité météo.")
+
+    # Rapport benchmark (critère technique/performance + gouvernance)
+    benchmark_df = pd.DataFrame(results, columns=["model", "mae_min", "rmse_min"])
+    benchmark_df["runtime_s"] = benchmark_df["model"].map(model_times_s).fillna(0.0)
+    benchmark_df = benchmark_df.sort_values("mae_min", ascending=True)
+    benchmark_path = BASE_DIR / "model_benchmark_report.csv"
+    benchmark_df.to_csv(benchmark_path, index=False)
+    print(f"  Rapport benchmark sauvegardé : {benchmark_path.name}")
 
     # Prédictions pour probabilite_par_minute.py : uniquement OOF (jamais fit sur tout X puis predict(X))
     if best_name == "linear_baseline":
@@ -533,6 +597,53 @@ def run_model(
     print(
         f"\n  Prédictions sauvegardées (out-of-fold, sans fuite train→test) : {preds_path.name}"
     )
+
+    # Explicabilité : top variables du meilleur modèle
+    # (fit final sur tout le dataset, uniquement pour interprétation)
+    if best_name == "linear_baseline":
+        pipe_linear.fit(X, y)
+        fitted_artifacts[best_name] = pipe_linear
+    elif best_name == "rf_default":
+        pipe_rf.fit(X, y)
+        fitted_artifacts[best_name] = pipe_rf
+    elif best_name == "rf_tuned":
+        if groups is not None:
+            search_rf_template.fit(X, y, groups=groups)
+        else:
+            search_rf_template.fit(X, y)
+        fitted_artifacts[best_name] = search_rf_template
+    elif best_name == "xgb_tuned" and use_xgboost and HAS_XGB:
+        if groups is not None:
+            search_xgb_template.fit(X, y, groups=groups)
+        else:
+            search_xgb_template.fit(X, y)
+        fitted_artifacts[best_name] = search_xgb_template
+    elif best_name == "catboost_tuned" and HAS_CATBOOST:
+        if groups is not None:
+            search_cat_template.fit(X, y, groups=groups)
+        else:
+            search_cat_template.fit(X, y)
+        fitted_artifacts[best_name] = search_cat_template
+
+    if best_name in fitted_artifacts:
+        imp_df = _extract_feature_importance(best_name, fitted_artifacts[best_name], list(X.columns))
+        if imp_df is not None:
+            imp_path = BASE_DIR / "model_explainability_top_features.csv"
+            imp_df.head(20).to_csv(imp_path, index=False)
+            print(f"  Explicabilité sauvegardée : {imp_path.name} (top 20 variables)")
+        else:
+            print("  Explicabilité non disponible pour ce type de modèle.")
+    else:
+        print("  Explicabilité non générée pour ce modèle.")
+
+    # Proxy empreinte calcul (critère environnemental) : durée de calcul par modèle
+    total_runtime_s = time.perf_counter() - run_start
+    footprint_df = benchmark_df[["model", "runtime_s"]].copy()
+    footprint_df["runtime_share_pct"] = 100.0 * footprint_df["runtime_s"] / max(total_runtime_s, 1e-9)
+    footprint_path = BASE_DIR / "compute_footprint_proxy.csv"
+    footprint_df.to_csv(footprint_path, index=False)
+    print(f"  Proxy empreinte calcul sauvegardé : {footprint_path.name}")
+    print(f"  Temps total run modèle : {total_runtime_s:.1f}s")
 
 
 if __name__ == "__main__":

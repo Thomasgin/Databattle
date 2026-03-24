@@ -74,3 +74,10 @@ Probabilités seules :
 ```bash
 python3 probabilite_par_minute.py
 ```
+
+## 📊 Livrables d'évaluation (jury)
+- `model_benchmark_report.csv` : comparaison des modèles (MAE, RMSE, temps de calcul).
+- `model_explainability_top_features.csv` : top variables explicatives du meilleur modèle (si disponible).
+- `compute_footprint_proxy.csv` : proxy d'empreinte calcul (temps par modèle et part relative).
+- `ENVIRONNEMENT_SOCIAL.md` : analyse impacts environnementaux et sociaux + actions.
+- `GOUVERNANCE_PROJET.md` : gouvernance, processus de décision et plan de poursuite.
