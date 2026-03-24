@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 # --- 1. CHARGEMENT ET NETTOYAGE ---
 def load_and_clean(path):
@@ -31,39 +32,65 @@ def load_and_clean(path):
     return df_c
 
 # --- 2. CLUSTERING ET VISUALISATION ---
-def run_clustering(df):
-    features = ['prox_ratio', 'ic_ratio', 'speed', 'log_storm_surface', 
-                'mean_amplitude', 'log_n_lightnings', 'mean_dist']
+def run_clustering(path_csv):
+    df = pd.read_csv(path_csv)
     
+    features = [
+        'ic_ratio',        # Physique de l'éclair
+        'mean_amplitude',  # Puissance du système
+        'speed',           # Cinématique (mouvement)
+        'lat_std',         # Étalement Nord-Sud
+        'lon_std',         # Étalement Est-Ouest
+        'mean_dist',       # Centrage par rapport à l'aéroport
+        'prox_ratio'       # Dangerosité immédiate
+    ]
+    
+    # Suppression des lignes avec des NaN sur ces colonnes si besoin
+    df_clean = df.dropna(subset=features).copy()
+    
+    # préparation du clustering
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(df[features])
+    X_scaled = scaler.fit_transform(df_clean[features])
     
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    df['storm_type'] = kmeans.fit_predict(X_scaled)
+    # On fixe à 3 clusters pour une typologie claire
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    df_clean['storm_type'] = kmeans.fit_predict(X_scaled)
     
-    # --- VISUALISATION ---
-    plt.figure(figsize=(12, 5))
+    # visualisation avec PCA 
+    pca = PCA(n_components=2)
+    pca_results = pca.fit_transform(X_scaled)
+    df_clean['pca_1'] = pca_results[:, 0]
+    df_clean['pca_2'] = pca_results[:, 1]
     
-    # Graphique 1 : Intensité vs Taille
-    plt.subplot(1, 2, 1)
-    sns.scatterplot(data=df, x='log_n_lightnings', y='log_storm_surface', 
-                    hue='storm_type', palette='viridis', alpha=0.6)
-    plt.title('Typologie des Orages (Intensité vs Taille)')
+    # affichage des clusters
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
     
-    # Graphique 2 : Profil des Clusters (Moyennes)
-    plt.subplot(1, 2, 2)
-    cluster_means = df.groupby('storm_type')[features].mean()
-    sns.heatmap(cluster_means, annot=True, cmap='YlGnBu')
-    plt.title('Signature Physique par Cluster')
+    # Graphique A : Projection PCA 
+    sns.scatterplot(
+        data=df_clean, x='pca_1', y='pca_2', hue='storm_type', 
+        palette='bright', alpha=0.6, ax=ax1, s=60, edgecolor='black'
+    )
+    ax1.set_title('Topologie des Orages (Projection PCA)', fontsize=15, fontweight='bold')
+    ax1.set_xlabel('Dimension 1 : Diversité Structurelle')
+    ax1.set_ylabel('Dimension 2 : Intensité/Vitesse')
+    
+    # Graphique B : Signature par Cluster (Z-Scores)
+    cluster_profiles = pd.DataFrame(X_scaled, columns=features)
+    cluster_profiles['storm_type'] = df_clean['storm_type'].values
+    z_score_means = cluster_profiles.groupby('storm_type').mean()
+    
+    sns.heatmap(z_score_means, annot=True, cmap='RdYlBu_r', center=0, ax=ax2)
+    ax2.set_title('Signature Physique par Cluster (Z-Score)', fontsize=15, fontweight='bold')
     
     plt.tight_layout()
     plt.savefig('cluster_analysis.png')
     plt.show()
     
-    return df
+    return df_clean
 
 if __name__ == "__main__":
-    df_clean = load_and_clean('alerts_preprocessed.csv')
-    df_clustered = run_clustering(df_clean)
-    df_clustered.to_csv('alerts_with_clusters.csv', index=False)
-    print("Fichier 'alerts_with_clusters.csv' généré avec succès.")
+    #df_clean = load_and_clean('alerts_preprocessed.csv')
+    #df_clustered = run_clustering(df_clean)
+    #df_clustered.to_csv('alerts_with_clusters.csv', index=False)
+    #print("Fichier 'alerts_with_clusters.csv' généré avec succès.")
+    df_visu = run_clustering('alerts_with_clusters.csv')
