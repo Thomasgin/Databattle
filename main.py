@@ -34,6 +34,11 @@ def main() -> None:
         action="store_true",
         help="N'exécute pas l'analyse des tendances par aéroport (fichiers CSV).",
     )
+    parser.add_argument(
+        "--codecarbon",
+        action="store_true",
+        help="Passe l'option à modele.py : mesure CodeCarbon (énergie / CO₂eq) pendant le run modèle.",
+    )
     args = parser.parse_args()
 
     base_dir = pathlib.Path(__file__).resolve().parent
@@ -76,7 +81,12 @@ def main() -> None:
         )
 
     print(f"[2/3] Modèle de régression sur: {out_csv}")
-    run_model(csv_path=str(out_csv), use_enriched=False, xgboost_mode=args.xgboost)
+    run_model(
+        csv_path=str(out_csv),
+        use_enriched=False,
+        xgboost_mode=args.xgboost,
+        use_codecarbon=args.codecarbon,
+    )
 
     if not args.skip_analyse_aeroport:
         from analyse_par_aeroport import run_analyse_par_aeroport

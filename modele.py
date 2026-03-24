@@ -47,6 +47,91 @@ OUTER_N_JOBS = 1
 
 GROUP_COL = "alert_airport_id"
 
+# Ordre de grandeur pour estimation énergie / CO₂ sans capteur (voir ENVIRONNEMENT_SOCIAL.md §2.3)
+_ESTIMATE_MEAN_POWER_W = 45.0  # portable sous charge type entraînement sklearn
+_ESTIMATE_GRID_G_CO2_PER_KWH = 56.0  # mix électrique France, valeur indicative (ADEME / ordres de grandeur)
+
+
+def _write_simple_energy_co2_estimate(
+    footprint_df: pd.DataFrame,
+    total_runtime_wall_s: float,
+    base_dir: pathlib.Path,
+) -> None:
+    """
+    Estimation indicative : E (kWh) ≈ P(W) × t(s) / 3_600_000 ;
+    CO₂eq (kg) ≈ E × intensité (g/kWh) / 1000.
+    """
+    df = footprint_df[["model", "runtime_s"]].copy()
+    df["power_assumed_W"] = _ESTIMATE_MEAN_POWER_W
+    df["energy_kWh_estimated"] = _ESTIMATE_MEAN_POWER_W * df["runtime_s"] / 3_600_000.0
+    df["kg_CO2eq_estimated"] = df["energy_kWh_estimated"] * _ESTIMATE_GRID_G_CO2_PER_KWH / 1_000.0
+    df["grid_g_CO2_per_kWh_assumed"] = _ESTIMATE_GRID_G_CO2_PER_KWH
+
+    wall_kwh = _ESTIMATE_MEAN_POWER_W * total_runtime_wall_s / 3_600_000.0
+    wall_co2 = wall_kwh * _ESTIMATE_GRID_G_CO2_PER_KWH / 1_000.0
+    extra = pd.DataFrame(
+        [
+            {
+                "model": "_TOTAL_modeles_somme_temps",
+                "runtime_s": float(df["runtime_s"].sum()),
+                "power_assumed_W": _ESTIMATE_MEAN_POWER_W,
+                "energy_kWh_estimated": float(df["energy_kWh_estimated"].sum()),
+                "kg_CO2eq_estimated": float(df["kg_CO2eq_estimated"].sum()),
+                "grid_g_CO2_per_kWh_assumed": _ESTIMATE_GRID_G_CO2_PER_KWH,
+            },
+            {
+                "model": "_TOTAL_temps_mur_run",
+                "runtime_s": float(total_runtime_wall_s),
+                "power_assumed_W": _ESTIMATE_MEAN_POWER_W,
+                "energy_kWh_estimated": wall_kwh,
+                "kg_CO2eq_estimated": wall_co2,
+                "grid_g_CO2_per_kWh_assumed": _ESTIMATE_GRID_G_CO2_PER_KWH,
+            },
+        ]
+    )
+    out = pd.concat([df, extra], ignore_index=True)
+    path = base_dir / "compute_footprint_estimate_simple.csv"
+    out.to_csv(path, index=False)
+    print(
+        f"  Estimation simple énergie/CO₂ → {path.name} "
+        f"(≈ {wall_kwh:.5f} kWh, ≈ {wall_co2:.5f} kg CO₂eq sur temps mur {total_runtime_wall_s:.0f}s ; "
+        f"hypothèses {_ESTIMATE_MEAN_POWER_W:.0f} W, {_ESTIMATE_GRID_G_CO2_PER_KWH:.0f} g/kWh)"
+    )
+
+
+def _maybe_start_codecarbon(enabled: bool):
+    """Mesure optionnelle kWh / CO₂eq (alignée critère environnement / Gaia)."""
+    if not enabled:
+        return None
+    try:
+        from codecarbon import EmissionsTracker
+    except ImportError:
+        print(
+            "  [--codecarbon] Paquet absent : pip install codecarbon "
+            "(voir requirements.txt)."
+        )
+        return None
+    tracker = EmissionsTracker(
+        project_name="DataBattle_DBPower",
+        output_dir=str(BASE_DIR),
+        output_file="codecarbon_emissions_databattle.csv",
+        log_level="warning",
+    )
+    tracker.start()
+    print("  Mesure CodeCarbon active (énergie et CO₂eq estimés sur ce run).")
+    return tracker
+
+
+def _maybe_stop_codecarbon(tracker) -> None:
+    if tracker is None:
+        return
+    try:
+        tracker.stop()
+        path = BASE_DIR / "codecarbon_emissions_databattle.csv"
+        print(f"  CodeCarbon : export mis à jour → {path.name}")
+    except Exception as exc:
+        print(f"  CodeCarbon : fin de mesure ({exc})")
+
 
 def _resolve_xgboost_choice(xgboost_mode: str) -> bool:
     """
@@ -286,6 +371,7 @@ def run_model(
     csv_path: str | None = None,
     use_enriched: bool = False,
     xgboost_mode: str = "ask",
+    use_codecarbon: bool = False,
 ) -> None:
     run_start = time.perf_counter()
     use_xgboost = _resolve_xgboost_choice(xgboost_mode)
@@ -295,6 +381,22 @@ def run_model(
     loaded = _load_xy(csv_path, use_enriched)
     if loaded is None:
         return
+    tracker = _maybe_start_codecarbon(use_codecarbon)
+    try:
+        _run_model_core(
+            loaded,
+            run_start,
+            use_xgboost,
+        )
+    finally:
+        _maybe_stop_codecarbon(tracker)
+
+
+def _run_model_core(
+    loaded: tuple,
+    run_start: float,
+    use_xgboost: bool,
+) -> None:
     csv_file, X, y, groups, feature_cols = loaded
 
     cv_splits = 3
@@ -644,6 +746,7 @@ def run_model(
     footprint_df.to_csv(footprint_path, index=False)
     print(f"  Proxy empreinte calcul sauvegardé : {footprint_path.name}")
     print(f"  Temps total run modèle : {total_runtime_s:.1f}s")
+    _write_simple_energy_co2_estimate(footprint_df, total_runtime_s, BASE_DIR)
 
 
 if __name__ == "__main__":
@@ -667,8 +770,18 @@ if __name__ == "__main__":
         default="ask",
         help="Active XGBoost: ask (demande), on (force), off (désactive).",
     )
+    parser.add_argument(
+        "--codecarbon",
+        action="store_true",
+        help="Mesure énergie / CO₂eq (CodeCarbon) sur tout le run modèle. Requiert: pip install codecarbon",
+    )
     args = parser.parse_args()
     if args.mlp_only:
         run_mlp_only(csv_path=args.csv, use_enriched=args.enriched)
     else:
-        run_model(csv_path=args.csv, use_enriched=args.enriched, xgboost_mode=args.xgboost)
+        run_model(
+            csv_path=args.csv,
+            use_enriched=args.enriched,
+            xgboost_mode=args.xgboost,
+            use_codecarbon=args.codecarbon,
+        )

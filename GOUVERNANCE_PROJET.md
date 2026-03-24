@@ -11,6 +11,7 @@
 ### 1.2 Sources pour trancher
 - `model_benchmark_report.csv` pour comparer les modèles.
 - `compute_footprint_proxy.csv` pour estimer le coût calcul.
+- `compute_footprint_estimate_simple.csv` pour une estimation indicative énergie / CO₂eq (sans outil externe).
 - `model_explainability_top_features.csv` pour l'interprétabilité.
 
 ## 2) Rôles (adaptables selon disponibilité)
@@ -35,7 +36,7 @@
 
 ### 4.1 Court terme (1-2 semaines)
 1. Figer une configuration de référence (modèles activés, seed, seuil de décision).
-2. Mesurer la consommation avec un outil dédié (Gaia/CodeCarbon).
+2. Archiver les totaux de `compute_footprint_estimate_simple.csv` ; compléter avec Gaia ou CodeCarbon si exigé.
 3. Ajouter un tableau de bord simple de suivi des runs.
 
 ### 4.2 Moyen terme (1-2 mois)

@@ -92,11 +92,17 @@ Pipeline sans l'étape « tendances par aéroport » :
 python3 main.py --skip-analyse-aeroport
 ```
 
+À chaque run de `modele.py`, un fichier **`compute_footprint_estimate_simple.csv`** est créé : estimation **ordre de grandeur** kWh et kg CO₂eq (hypothèses 45 W, ~56 g/kWh — voir `ENVIRONNEMENT_SOCIAL.md` §2.3). Aucun outil obligatoire.
+
+Optionnel — **CodeCarbon** (après `pip install codecarbon`) : `python3 modele.py ... --codecarbon` → `codecarbon_emissions_databattle.csv`.
+
 ## 📊 Livrables d'évaluation (jury)
 - `model_benchmark_report.csv` : comparaison des modèles (MAE, RMSE, temps de calcul).
 - `model_explainability_top_features.csv` : top variables explicatives du meilleur modèle (si disponible).
 - `compute_footprint_proxy.csv` : proxy d'empreinte calcul (temps par modèle et part relative).
-- `ENVIRONNEMENT_SOCIAL.md` : analyse impacts environnementaux et sociaux + actions.
+- `compute_footprint_estimate_simple.csv` : estimation indicative kWh / kg CO₂eq (temps mesuré × hypothèses ; §2.3 `ENVIRONNEMENT_SOCIAL.md`).
+- `codecarbon_emissions_databattle.csv` : uniquement si `--codecarbon` + `pip install codecarbon`.
+- `ENVIRONNEMENT_SOCIAL.md` : impacts, arbre de conséquences, méthode de quantification simple.
 - `GOUVERNANCE_PROJET.md` : gouvernance, processus de décision et plan de poursuite.
 - `tendances_par_aeroport.csv` : synthèse quantitative par aéroport (après exécution du pipeline ou de `analyse_par_aeroport.py`).
 - `repartition_storm_type_par_aeroport.csv` : répartition des clusters par site (si `storm_type` présent).
