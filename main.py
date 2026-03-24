@@ -29,6 +29,15 @@ def main() -> None:
         default="ask",
         help="Active XGBoost pour le modèle: ask (demande), on (force), off (désactive).",
     )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="all",
+        help=(
+            "Modèles à exécuter: all, ask, ou liste CSV "
+            "(ex: rf_default,rf_tuned,xgb_tuned)."
+        ),
+    )
     args = parser.parse_args()
 
     base_dir = pathlib.Path(__file__).resolve().parent
@@ -71,7 +80,12 @@ def main() -> None:
         )
 
     print(f"[2/3] Modèle de régression sur: {out_csv}")
-    run_model(csv_path=str(out_csv), use_enriched=False, xgboost_mode=args.xgboost)
+    run_model(
+        csv_path=str(out_csv),
+        use_enriched=False,
+        xgboost_mode=args.xgboost,
+        models_mode=args.models,
+    )
 
     if not args.skip_probabilites:
         print("[3/3] Probabilités par minute (terminal)...")
