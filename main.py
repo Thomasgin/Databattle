@@ -29,6 +29,11 @@ def main() -> None:
         default="ask",
         help="Active XGBoost pour le modèle: ask (demande), on (force), off (désactive).",
     )
+    parser.add_argument(
+        "--skip-analyse-aeroport",
+        action="store_true",
+        help="N'exécute pas l'analyse des tendances par aéroport (fichiers CSV).",
+    )
     args = parser.parse_args()
 
     base_dir = pathlib.Path(__file__).resolve().parent
@@ -72,6 +77,12 @@ def main() -> None:
 
     print(f"[2/3] Modèle de régression sur: {out_csv}")
     run_model(csv_path=str(out_csv), use_enriched=False, xgboost_mode=args.xgboost)
+
+    if not args.skip_analyse_aeroport:
+        from analyse_par_aeroport import run_analyse_par_aeroport
+
+        print("[2b/3] Analyse tendances par aéroport...")
+        run_analyse_par_aeroport(base_dir, csv_path=str(out_csv))
 
     if not args.skip_probabilites:
         print("[3/3] Probabilités par minute (terminal)...")

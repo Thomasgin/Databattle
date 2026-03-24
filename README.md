@@ -14,13 +14,18 @@
 Nous cherchons à prédire la durée d'une alerte orage en minutes à partir de données météo et d'activité foudre.  
 L'objectif est d'améliorer la décision de levée d'alerte par rapport à une règle fixe, avec une approche robuste (validation out-of-fold, GroupKFold).
 
-## 💡 Solution proposée
-Notre pipeline comporte trois étapes :
-- **Clustering** (`clustering.py`) pour enrichir les alertes avec un type d'orage (`storm_type`).
-- **Modélisation** (`modele.py`) pour comparer plusieurs modèles de régression (linéaire, Random Forest, XGBoost, CatBoost, MLP selon options).
-- **Aide à la décision** (`probabilite_par_minute.py`) pour traduire les prédictions en minute de levée selon un seuil de confiance.
+Les données d'alerte sont fournies au niveau agrégé par alerte (une ligne = une alerte), avec une colonne **`airport`** pour identifier le site. Nous ne tranchons pas ici un rayon géographique en kilomètres : les documents du challenge peuvent différer ; le périmètre effectif est celui du jeu de données utilisé.
 
-Le modèle final est sélectionné automatiquement selon la **MAE** la plus faible.
+## 💡 Solution proposée
+### Axe 1 — Fin d'alerte et aide à la décision
+- **Clustering** (`clustering.py`) : typologie d'orages (`storm_type`).
+- **Modélisation** (`modele.py`) : comparaison de modèles de régression ; sélection par **MAE** minimale.
+- **Probabilités / seuils** (`probabilite_par_minute.py`) : traduction des prédictions en minutes de levée selon un niveau de confiance, et comparaison avec une règle-type « attente après dernier éclair ».
+
+### Axe 2 — Tendances par aéroport
+- **Analyse descriptive** (`analyse_par_aeroport.py`) : statistiques par `airport`, répartition des `storm_type` par site (fichiers CSV exportés pour le jury).
+
+Le pipeline principal est `main.py` (clustering → modèle → analyse par aéroport → probabilités, sauf options `--skip-*`).
 
 ## ⚙️ Stack technique
 - Langages :
@@ -75,9 +80,23 @@ Probabilités seules :
 python3 probabilite_par_minute.py
 ```
 
+Analyse par aéroport seule (après clustering) :
+
+```bash
+python3 analyse_par_aeroport.py --csv alerts_with_clusters.csv
+```
+
+Pipeline sans l'étape « tendances par aéroport » :
+
+```bash
+python3 main.py --skip-analyse-aeroport
+```
+
 ## 📊 Livrables d'évaluation (jury)
 - `model_benchmark_report.csv` : comparaison des modèles (MAE, RMSE, temps de calcul).
 - `model_explainability_top_features.csv` : top variables explicatives du meilleur modèle (si disponible).
 - `compute_footprint_proxy.csv` : proxy d'empreinte calcul (temps par modèle et part relative).
 - `ENVIRONNEMENT_SOCIAL.md` : analyse impacts environnementaux et sociaux + actions.
 - `GOUVERNANCE_PROJET.md` : gouvernance, processus de décision et plan de poursuite.
+- `tendances_par_aeroport.csv` : synthèse quantitative par aéroport (après exécution du pipeline ou de `analyse_par_aeroport.py`).
+- `repartition_storm_type_par_aeroport.csv` : répartition des clusters par site (si `storm_type` présent).
