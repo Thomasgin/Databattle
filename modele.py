@@ -45,14 +45,6 @@ CPU_COUNT = os.cpu_count() or 2
 OUTER_N_JOBS = 1
 
 GROUP_COL = "alert_airport_id"
-MODEL_CHOICES = (
-    "linear_baseline",
-    "rf_default",
-    "rf_tuned",
-    "xgb_tuned",
-    "catboost_tuned",
-    "mlp_dense",
-)
 
 
 def _resolve_xgboost_choice(xgboost_mode: str) -> bool:
@@ -74,45 +66,6 @@ def _resolve_xgboost_choice(xgboost_mode: str) -> bool:
         return choice in {"y", "yes", "o", "oui"}
     print("  Mode non interactif : XGBoost désactivé (xgboost_mode=ask).")
     return False
-
-
-def _resolve_model_selection(models_mode: str) -> set[str]:
-    """
-    Détermine la liste des modèles à exécuter.
-    - all/default : tous les modèles
-    - ask         : question interactive à l'utilisateur
-    - liste CSV   : ex. "rf_default,rf_tuned,xgb_tuned"
-    """
-    mode = models_mode.strip().lower()
-    if mode in {"all", "default"}:
-        return set(MODEL_CHOICES)
-
-    if mode == "ask":
-        if not sys.stdin.isatty():
-            print("  Mode non interactif : sélection de modèles par défaut (all).")
-            return set(MODEL_CHOICES)
-        print("\n  Modèles disponibles :")
-        print("   - linear_baseline")
-        print("   - rf_default")
-        print("   - rf_tuned")
-        print("   - xgb_tuned")
-        print("   - catboost_tuned")
-        print("   - mlp_dense")
-        raw = input("  Choisis un ou plusieurs modèles (CSV) ou 'all' : ").strip().lower()
-        if not raw or raw == "all":
-            return set(MODEL_CHOICES)
-        selected = {m.strip() for m in raw.split(",") if m.strip()}
-    else:
-        selected = {m.strip() for m in mode.split(",") if m.strip()}
-
-    invalid = sorted(selected - set(MODEL_CHOICES))
-    if invalid:
-        print(f"  Modèles inconnus ignorés : {', '.join(invalid)}")
-    final = selected & set(MODEL_CHOICES)
-    if not final:
-        print("  Aucun modèle valide sélectionné. Fallback sur 'rf_default'.")
-        return {"rf_default"}
-    return final
 
 
 def _ensure_xgboost() -> bool:
@@ -296,13 +249,9 @@ def run_model(
     csv_path: str | None = None,
     use_enriched: bool = False,
     xgboost_mode: str = "ask",
-    models_mode: str = "all",
 ) -> None:
-    selected_models = _resolve_model_selection(models_mode)
-    print(f"  Modèles sélectionnés : {', '.join(sorted(selected_models))}")
-
     use_xgboost = _resolve_xgboost_choice(xgboost_mode)
-    if "xgb_tuned" in selected_models and use_xgboost:
+    if use_xgboost:
         _ensure_xgboost()
 
     loaded = _load_xy(csv_path, use_enriched)
@@ -315,103 +264,98 @@ def run_model(
 
     results = []
 
-    y_pred_lr: np.ndarray | None = None
-    if "linear_baseline" in selected_models:
-        # Baseline : régression linéaire (OLS) sur les mêmes features, même protocole OOF / groupes
-        print("  Régression linéaire (baseline)")
-        pipe_linear = Pipeline(
-            [
-                ("scaler", StandardScaler()),
-                ("model", LinearRegression()),
-            ]
+    # Baseline : régression linéaire (OLS) sur les mêmes features, même protocole OOF / groupes
+    print("  Régression linéaire (baseline)")
+    pipe_linear = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("model", LinearRegression()),
+        ]
+    )
+    if groups is not None:
+        gkf_lin = GroupKFold(n_splits=cv_splits)
+        y_pred_lr = cross_val_predict(
+            pipe_linear, X, y, cv=gkf_lin, groups=groups, n_jobs=OUTER_N_JOBS
         )
-        if groups is not None:
-            gkf_lin = GroupKFold(n_splits=cv_splits)
-            y_pred_lr = cross_val_predict(
-                pipe_linear, X, y, cv=gkf_lin, groups=groups, n_jobs=OUTER_N_JOBS
-            )
-        else:
-            y_pred_lr = cross_val_predict(
-                pipe_linear, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
-            )
-        lr_mae = mean_absolute_error(y, y_pred_lr)
-        lr_rmse = np.sqrt(mean_squared_error(y, y_pred_lr))
-        results.append(("linear_baseline", lr_mae, lr_rmse))
-        print(f"    -> linear_baseline terminé | MAE={lr_mae:.3f} RMSE={lr_rmse:.3f}")
+    else:
+        y_pred_lr = cross_val_predict(
+            pipe_linear, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+        )
+    lr_mae = mean_absolute_error(y, y_pred_lr)
+    lr_rmse = np.sqrt(mean_squared_error(y, y_pred_lr))
+    results.append(("linear_baseline", lr_mae, lr_rmse))
+    print(f"    -> linear_baseline terminé | MAE={lr_mae:.3f} RMSE={lr_rmse:.3f}")
 
     # RF défaut MODELE 1
 
-    y_pred: np.ndarray | None = None
-    if "rf_default" in selected_models:
-        print("  Random forest default MODELE 1")
-        rf_estimators = 120
-        pipe_rf = Pipeline([
-            ("model", RandomForestRegressor(n_estimators=rf_estimators, max_depth=None, random_state=RANDOM_STATE, n_jobs=1)),
-        ])
-        if groups is not None:
-            gkf = GroupKFold(n_splits=cv_splits)
-            y_pred = cross_val_predict(
-                pipe_rf, X, y, cv=gkf, groups=groups, n_jobs=OUTER_N_JOBS
-            )
-        else:
-            y_pred = cross_val_predict(pipe_rf, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS)
-        rf_default_mae = mean_absolute_error(y, y_pred)
-        rf_default_rmse = np.sqrt(mean_squared_error(y, y_pred))
-        results.append(("rf_default", rf_default_mae, rf_default_rmse))  # calcul du MAE et RMSE
-        print(f"    -> rf_default terminé | MAE={rf_default_mae:.3f} RMSE={rf_default_rmse:.3f}")
+    print("  Random forest default MODELE 1")
+    rf_estimators = 120
+    pipe_rf = Pipeline([
+        ("model", RandomForestRegressor(n_estimators=rf_estimators, max_depth=None, random_state=RANDOM_STATE, n_jobs=1)),
+    ])
+    if groups is not None:
+        gkf = GroupKFold(n_splits=cv_splits)
+        y_pred = cross_val_predict(
+            pipe_rf, X, y, cv=gkf, groups=groups, n_jobs=OUTER_N_JOBS
+        )
+    else:
+        y_pred = cross_val_predict(pipe_rf, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS)
+    rf_default_mae = mean_absolute_error(y, y_pred)
+    rf_default_rmse = np.sqrt(mean_squared_error(y, y_pred))
+    results.append(("rf_default", rf_default_mae, rf_default_rmse))  # calcul du MAE et RMSE
+    print(f"    -> rf_default terminé | MAE={rf_default_mae:.3f} RMSE={rf_default_rmse:.3f}")
 
     # Random forest tuned MODELE 2
 
-    y_pred_tuned: np.ndarray | None = None
-    if "rf_tuned" in selected_models:
-        print("  Random forest tuned MODELE 2")
-        pipe_tuned = Pipeline([
-            ("model", RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=1)),
-        ])
-        inner_cv_rf: GroupKFold | KFold
-        if groups is not None:
-            inner_cv_rf = GroupKFold(n_splits=cv_splits)
-        else:
-            inner_cv_rf = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
-        # Espace de recherche élargi et plus stable que la version initiale :
-        # - davantage de candidats utiles
-        # - contrôle de complexité (split/leaf) pour limiter le sur-apprentissage
-        search_rf_template = RandomizedSearchCV(
-            pipe_tuned,
-            param_distributions={
-                "model__n_estimators": [120, 200, 300, 500],
-                "model__max_depth": [None, 10, 15, 25, 35],
-                "model__min_samples_split": [2, 5, 10],
-                "model__min_samples_leaf": [1, 2, 4],
-                "model__max_features": ["sqrt", "log2", 0.4, 0.6, 0.8],
-                "model__bootstrap": [True, False],
-            },
-            n_iter=24,
-            cv=inner_cv_rf,
-            scoring="neg_mean_absolute_error",
-            random_state=RANDOM_STATE,
-            n_jobs=OUTER_N_JOBS,
-            verbose=0,
+    print("  Random forest tuned MODELE 2")
+    pipe_tuned = Pipeline([
+        ("model", RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=1)),
+    ])
+    inner_cv_rf: GroupKFold | KFold
+    if groups is not None:
+        inner_cv_rf = GroupKFold(n_splits=cv_splits)
+    else:
+        inner_cv_rf = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+    # Espace de recherche élargi et plus stable que la version initiale :
+    # - davantage de candidats utiles
+    # - contrôle de complexité (split/leaf) pour limiter le sur-apprentissage
+    search_rf_template = RandomizedSearchCV(
+        pipe_tuned,
+        param_distributions={
+            "model__n_estimators": [120, 200, 300, 500],
+            "model__max_depth": [None, 10, 15, 25, 35],
+            "model__min_samples_split": [2, 5, 10],
+            "model__min_samples_leaf": [1, 2, 4],
+            "model__max_features": ["sqrt", "log2", 0.4, 0.6, 0.8],
+            "model__bootstrap": [True, False],
+        },
+        n_iter=24,
+        cv=inner_cv_rf,
+        scoring="neg_mean_absolute_error",
+        random_state=RANDOM_STATE,
+        n_jobs=OUTER_N_JOBS,
+        verbose=0,
+    )
+    if groups is not None:
+        y_pred_tuned = _oof_grouped_search_predict(
+            search_rf_template, X, y, groups, cv_splits
         )
-        if groups is not None:
-            y_pred_tuned = _oof_grouped_search_predict(
-                search_rf_template, X, y, groups, cv_splits
-            )
-        else:
-            # Nested CV : RandomizedSearchCV ré-entraîné sur chaque pli train uniquement
-            y_pred_tuned = cross_val_predict(
-                search_rf_template, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
-            )
-        rf_tuned_mae = mean_absolute_error(y, y_pred_tuned)
-        rf_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_tuned))
-        results.append(("rf_tuned", rf_tuned_mae, rf_tuned_rmse))
-        print(f"    -> rf_tuned terminé | MAE={rf_tuned_mae:.3f} RMSE={rf_tuned_rmse:.3f}")
+    else:
+        # Nested CV : RandomizedSearchCV ré-entraîné sur chaque pli train uniquement
+        y_pred_tuned = cross_val_predict(
+            search_rf_template, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+        )
+    rf_tuned_mae = mean_absolute_error(y, y_pred_tuned)
+    rf_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_tuned))
+    results.append(("rf_tuned", rf_tuned_mae, rf_tuned_rmse))
+    print(f"    -> rf_tuned terminé | MAE={rf_tuned_mae:.3f} RMSE={rf_tuned_rmse:.3f}")
 
     # XGBoost tuné si dispo MODELE 3
 
+    print("  XGBoost tuned MODELE 3")
+
     y_pred_xgb: np.ndarray | None = None
-    if "xgb_tuned" in selected_models and use_xgboost and HAS_XGB:
-        print("  XGBoost tuned MODELE 3")
+    if use_xgboost and HAS_XGB:
         print("  Tuning XGBoost (OOF + groupes si disponibles)...")
         pipe_xgb = Pipeline([
             ("model", XGBRegressor(random_state=RANDOM_STATE, n_jobs=1)),
@@ -451,17 +395,16 @@ def run_model(
         results.append(("xgb_tuned", xgb_tuned_mae, xgb_tuned_rmse))
         print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
-        if "xgb_tuned" in selected_models:
-            print("  XGBoost tuned MODELE 3")
-            if use_xgboost:
-                print("  (XGBoost non installé : pip install xgboost)")
-            else:
-                print("  (XGBoost désactivé par l'utilisateur)")
+        if use_xgboost:
+            print("  (XGBoost non installé : pip install xgboost)")
+        else:
+            print("  (XGBoost désactivé par l'utilisateur)")
 
     # CatBoost tuné si dispo (même X numérique après get_dummies que les autres modèles)
+    print("  CatBoost tuned MODELE 4")
+
     y_pred_cat: np.ndarray | None = None
-    if "catboost_tuned" in selected_models and HAS_CATBOOST:
-        print("  CatBoost tuned MODELE 4")
+    if HAS_CATBOOST:
         print("  Tuning CatBoost (OOF + groupes si disponibles)...")
         pipe_cat = Pipeline(
             [
@@ -511,34 +454,26 @@ def run_model(
         results.append(("catboost_tuned", cat_mae, cat_rmse))
         print(f"    -> catboost_tuned terminé | MAE={cat_mae:.3f} RMSE={cat_rmse:.3f}")
     else:
-        if "catboost_tuned" in selected_models:
-            print("  CatBoost tuned MODELE 4")
-            print("  (CatBoost non installé : pip install catboost)")
+        print("  (CatBoost non installé : pip install catboost)")
 
     # MLP : X et y standardisés (voir _build_mlp_pipeline)
+    print("  MLP (réseau dense sklearn, X+y scalés)")
     pipe_mlp = _build_mlp_pipeline()
-    y_pred_mlp: np.ndarray | None = None
-    if "mlp_dense" in selected_models:
-        print("  MLP (réseau dense sklearn, X+y scalés)")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=ConvergenceWarning)
-            if groups is not None:
-                gkf_mlp = GroupKFold(n_splits=cv_splits)
-                y_pred_mlp = cross_val_predict(
-                    pipe_mlp, X, y, cv=gkf_mlp, groups=groups, n_jobs=OUTER_N_JOBS
-                )
-            else:
-                y_pred_mlp = cross_val_predict(
-                    pipe_mlp, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
-                )
-        mlp_mae = mean_absolute_error(y, y_pred_mlp)
-        mlp_rmse = np.sqrt(mean_squared_error(y, y_pred_mlp))
-        results.append(("mlp_dense", mlp_mae, mlp_rmse))
-        print(f"    -> mlp_dense terminé | MAE={mlp_mae:.3f} RMSE={mlp_rmse:.3f}")
-
-    if not results:
-        print("Aucun modèle n'a été exécuté. Vérifie --models.")
-        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        if groups is not None:
+            gkf_mlp = GroupKFold(n_splits=cv_splits)
+            y_pred_mlp = cross_val_predict(
+                pipe_mlp, X, y, cv=gkf_mlp, groups=groups, n_jobs=OUTER_N_JOBS
+            )
+        else:
+            y_pred_mlp = cross_val_predict(
+                pipe_mlp, X, y, cv=kf_shuffle, n_jobs=OUTER_N_JOBS
+            )
+    mlp_mae = mean_absolute_error(y, y_pred_mlp)
+    mlp_rmse = np.sqrt(mean_squared_error(y, y_pred_mlp))
+    results.append(("mlp_dense", mlp_mae, mlp_rmse))
+    print(f"    -> mlp_dense terminé | MAE={mlp_mae:.3f} RMSE={mlp_rmse:.3f}")
 
     print("\n" + "=" * 55)
     print("  " + csv_file.name + f" – Résultats (CV {cv_splits}-fold)")
@@ -621,22 +556,8 @@ if __name__ == "__main__":
         default="ask",
         help="Active XGBoost: ask (demande), on (force), off (désactive).",
     )
-    parser.add_argument(
-        "--models",
-        type=str,
-        default="all",
-        help=(
-            "Modèles à exécuter: all, ask, ou liste CSV "
-            "(ex: rf_default,rf_tuned,xgb_tuned)."
-        ),
-    )
     args = parser.parse_args()
     if args.mlp_only:
         run_mlp_only(csv_path=args.csv, use_enriched=args.enriched)
     else:
-        run_model(
-            csv_path=args.csv,
-            use_enriched=args.enriched,
-            xgboost_mode=args.xgboost,
-            models_mode=args.models,
-        )
+        run_model(csv_path=args.csv, use_enriched=args.enriched, xgboost_mode=args.xgboost)
