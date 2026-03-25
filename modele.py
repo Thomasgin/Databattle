@@ -45,6 +45,13 @@ CPU_COUNT = os.cpu_count() or 2
 # sur certaines machines (surcharge CPU/RAM quand CV et modèle parallélisent).
 OUTER_N_JOBS = 1
 
+# RF tuné : RandomizedSearchCV + CV interne + OOF groupé = très coûteux.
+# Compromis vitesse / qualité (ajuster si besoin) :
+# - moins d’itérations aléatoires, grille un peu réduite, CV interne 2 plis au lieu de 3.
+RF_TUNED_RANDOM_ITER = 12
+RF_TUNED_INNER_SPLITS = 3
+RF_TUNED_N_ESTIMATORS = [120, 200, 300]
+
 GROUP_COL = "alert_airport_id"
 
 # Ordre de grandeur pour estimation énergie / CO₂ sans capteur (voir ENVIRONNEMENT_SOCIAL.md §2.3)
@@ -459,24 +466,24 @@ def _run_model_core(
         ("model", RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=1)),
     ])
     inner_cv_rf: GroupKFold | KFold
+    inner_rf = max(2, min(RF_TUNED_INNER_SPLITS, cv_splits))
     if groups is not None:
-        inner_cv_rf = GroupKFold(n_splits=cv_splits)
+        inner_cv_rf = GroupKFold(n_splits=inner_rf)
     else:
-        inner_cv_rf = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
-    # Espace de recherche élargi et plus stable que la version initiale :
-    # - davantage de candidats utiles
-    # - contrôle de complexité (split/leaf) pour limiter le sur-apprentissage
+        inner_cv_rf = KFold(n_splits=inner_rf, shuffle=True, random_state=RANDOM_STATE)
+    # Espace de recherche : un peu réduit vs l’historique (pas de 500 arbres) pour accélérer
+    # sans sacrifier trop de diversité d’hypothèses.
     search_rf_template = RandomizedSearchCV(
         pipe_tuned,
         param_distributions={
-            "model__n_estimators": [120, 200, 300, 500],
+            "model__n_estimators": RF_TUNED_N_ESTIMATORS,
             "model__max_depth": [None, 10, 15, 25, 35],
             "model__min_samples_split": [2, 5, 10],
             "model__min_samples_leaf": [1, 2, 4],
             "model__max_features": ["sqrt", "log2", 0.4, 0.6, 0.8],
             "model__bootstrap": [True, False],
         },
-        n_iter=24,
+        n_iter=RF_TUNED_RANDOM_ITER,
         cv=inner_cv_rf,
         scoring="neg_mean_absolute_error",
         random_state=RANDOM_STATE,
@@ -550,11 +557,10 @@ def _run_model_core(
         else:
             print("  (XGBoost désactivé par l'utilisateur)")
 
-    # CatBoost tuné si dispo (même X numérique après get_dummies que les autres modèles)
-    print("  CatBoost tuned MODELE 4")
-
+    # CatBoost tuné : uniquement si le paquet est installé (voir requirements.txt).
     y_pred_cat: np.ndarray | None = None
     if HAS_CATBOOST:
+        print("  CatBoost tuned MODELE 4")
         print("  Tuning CatBoost (OOF + groupes si disponibles)...")
         t0 = time.perf_counter()
         pipe_cat = Pipeline(
@@ -605,8 +611,6 @@ def _run_model_core(
         results.append(("catboost_tuned", cat_mae, cat_rmse))
         model_times_s["catboost_tuned"] = time.perf_counter() - t0
         print(f"    -> catboost_tuned terminé | MAE={cat_mae:.3f} RMSE={cat_rmse:.3f}")
-    else:
-        print("  (CatBoost non installé : pip install catboost)")
 
     # MLP : X et y standardisés (voir _build_mlp_pipeline)
     print("  MLP (réseau dense sklearn, X+y scalés)")
