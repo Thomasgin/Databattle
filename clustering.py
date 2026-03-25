@@ -33,6 +33,8 @@ def load_and_clean(path):
 
 # --- 2. CLUSTERING ET VISUALISATION ---
 def run_clustering(path_csv):
+    #def run_clustering(df): 
+    #utilisé au début pour générer le fichier 'alerts_with_clusters.csv' à partir du DataFrame nettoyé
     df = pd.read_csv(path_csv)
     
     features = [
@@ -89,6 +91,7 @@ def run_clustering(path_csv):
     return df_clean
 
 if __name__ == "__main__":
+    #génération du fichier 'alerts_with_clusters.csv' 
     #df_clean = load_and_clean('alerts_preprocessed.csv')
     #df_clustered = run_clustering(df_clean)
     #df_clustered.to_csv('alerts_with_clusters.csv', index=False)
