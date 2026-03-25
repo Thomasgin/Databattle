@@ -255,16 +255,15 @@ def _load_xy(
     feature_cols = [c for c in df.columns if c != target_col]
     X = df[feature_cols].copy()
 
+    # Forcé en KFold classique : chaque ligne/alerte est évaluée individuellement.
+    groups = None
     if GROUP_COL in df.columns:
-        groups = df[GROUP_COL].values
-        n_grp = len(np.unique(groups))
         print(
-            f"  Validation par groupe ({GROUP_COL}) : {n_grp} groupes, {len(y)} lignes "
-            f"(GroupKFold 3 plis)."
+            f"  Colonne groupe détectée ({GROUP_COL}) mais ignorée volontairement : "
+            "validation KFold classique (3 plis)."
         )
     else:
-        groups = None
-        print("  Colonne groupe absente : KFold classique (risque de fuite si lignes corrélées).")
+        print("  Validation KFold classique (3 plis).")
 
     X = pd.get_dummies(X, drop_first=False)
     return csv_file, X, y, groups, feature_cols
