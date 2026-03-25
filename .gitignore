@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+# Mesures CodeCarbon locales (dépendent de la machine) — recopier les chiffres clés dans ENVIRONNEMENT_SOCIAL.md si besoin pour le jury
+codecarbon_emissions_databattle.csv
+emissions.csv

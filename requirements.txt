@@ -8,3 +8,5 @@ catboost>=1.2
 # Clustering + graphiques (main.py sans --skip-clustering)
 matplotlib>=3.7
 seaborn>=0.13
+
+# Optionnel — mesure outillée : pip install codecarbon  puis  modele.py --codecarbon

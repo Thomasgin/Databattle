@@ -3,6 +3,7 @@ import os
 import warnings
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -44,7 +45,99 @@ CPU_COUNT = os.cpu_count() or 2
 # sur certaines machines (surcharge CPU/RAM quand CV et modèle parallélisent).
 OUTER_N_JOBS = 1
 
+# RF tuné : RandomizedSearchCV + CV interne + OOF groupé = très coûteux.
+# Compromis vitesse / qualité (ajuster si besoin) :
+# - moins d’itérations aléatoires, grille un peu réduite, CV interne 2 plis au lieu de 3.
+RF_TUNED_RANDOM_ITER = 12
+RF_TUNED_INNER_SPLITS = 3
+RF_TUNED_N_ESTIMATORS = [120, 200, 300]
+
 GROUP_COL = "alert_airport_id"
+
+# Ordre de grandeur pour estimation énergie / CO₂ sans capteur (voir ENVIRONNEMENT_SOCIAL.md §2.3)
+_ESTIMATE_MEAN_POWER_W = 45.0  # portable sous charge type entraînement sklearn
+_ESTIMATE_GRID_G_CO2_PER_KWH = 56.0  # mix électrique France, valeur indicative (ADEME / ordres de grandeur)
+
+
+def _write_simple_energy_co2_estimate(
+    footprint_df: pd.DataFrame,
+    total_runtime_wall_s: float,
+    base_dir: pathlib.Path,
+) -> None:
+    """
+    Estimation indicative : E (kWh) ≈ P(W) × t(s) / 3_600_000 ;
+    CO₂eq (kg) ≈ E × intensité (g/kWh) / 1000.
+    """
+    df = footprint_df[["model", "runtime_s"]].copy()
+    df["power_assumed_W"] = _ESTIMATE_MEAN_POWER_W
+    df["energy_kWh_estimated"] = _ESTIMATE_MEAN_POWER_W * df["runtime_s"] / 3_600_000.0
+    df["kg_CO2eq_estimated"] = df["energy_kWh_estimated"] * _ESTIMATE_GRID_G_CO2_PER_KWH / 1_000.0
+    df["grid_g_CO2_per_kWh_assumed"] = _ESTIMATE_GRID_G_CO2_PER_KWH
+
+    wall_kwh = _ESTIMATE_MEAN_POWER_W * total_runtime_wall_s / 3_600_000.0
+    wall_co2 = wall_kwh * _ESTIMATE_GRID_G_CO2_PER_KWH / 1_000.0
+    extra = pd.DataFrame(
+        [
+            {
+                "model": "_TOTAL_modeles_somme_temps",
+                "runtime_s": float(df["runtime_s"].sum()),
+                "power_assumed_W": _ESTIMATE_MEAN_POWER_W,
+                "energy_kWh_estimated": float(df["energy_kWh_estimated"].sum()),
+                "kg_CO2eq_estimated": float(df["kg_CO2eq_estimated"].sum()),
+                "grid_g_CO2_per_kWh_assumed": _ESTIMATE_GRID_G_CO2_PER_KWH,
+            },
+            {
+                "model": "_TOTAL_temps_mur_run",
+                "runtime_s": float(total_runtime_wall_s),
+                "power_assumed_W": _ESTIMATE_MEAN_POWER_W,
+                "energy_kWh_estimated": wall_kwh,
+                "kg_CO2eq_estimated": wall_co2,
+                "grid_g_CO2_per_kWh_assumed": _ESTIMATE_GRID_G_CO2_PER_KWH,
+            },
+        ]
+    )
+    out = pd.concat([df, extra], ignore_index=True)
+    path = base_dir / "compute_footprint_estimate_simple.csv"
+    out.to_csv(path, index=False)
+    print(
+        f"  Estimation simple énergie/CO₂ → {path.name} "
+        f"(≈ {wall_kwh:.5f} kWh, ≈ {wall_co2:.5f} kg CO₂eq sur temps mur {total_runtime_wall_s:.0f}s ; "
+        f"hypothèses {_ESTIMATE_MEAN_POWER_W:.0f} W, {_ESTIMATE_GRID_G_CO2_PER_KWH:.0f} g/kWh)"
+    )
+
+
+def _maybe_start_codecarbon(enabled: bool):
+    """Mesure optionnelle kWh / CO₂eq (alignée critère environnement / Gaia)."""
+    if not enabled:
+        return None
+    try:
+        from codecarbon import EmissionsTracker
+    except ImportError:
+        print(
+            "  [--codecarbon] Paquet absent : pip install codecarbon "
+            "(voir requirements.txt)."
+        )
+        return None
+    tracker = EmissionsTracker(
+        project_name="DataBattle_DBPower",
+        output_dir=str(BASE_DIR),
+        output_file="codecarbon_emissions_databattle.csv",
+        log_level="warning",
+    )
+    tracker.start()
+    print("  Mesure CodeCarbon active (énergie et CO₂eq estimés sur ce run).")
+    return tracker
+
+
+def _maybe_stop_codecarbon(tracker) -> None:
+    if tracker is None:
+        return
+    try:
+        tracker.stop()
+        path = BASE_DIR / "codecarbon_emissions_databattle.csv"
+        print(f"  CodeCarbon : export mis à jour → {path.name}")
+    except Exception as exc:
+        print(f"  CodeCarbon : fin de mesure ({exc})")
 
 
 def _resolve_xgboost_choice(xgboost_mode: str) -> bool:
@@ -212,6 +305,42 @@ def _build_mlp_pipeline() -> Pipeline:
     )
 
 
+def _extract_feature_importance(
+    model_name: str,
+    fitted_obj,
+    feature_names: list[str],
+) -> pd.DataFrame | None:
+    """
+    Retourne un DataFrame d'importance des variables pour le modèle fourni.
+    """
+    if model_name == "linear_baseline":
+        coefs = fitted_obj.named_steps["model"].coef_
+        importances = np.abs(np.asarray(coefs, dtype=float))
+    elif model_name in {"rf_default", "rf_tuned", "xgb_tuned", "catboost_tuned"}:
+        if model_name in {"rf_tuned", "xgb_tuned", "catboost_tuned"}:
+            # RandomizedSearchCV -> best_estimator_ est un Pipeline
+            fitted_pipe = fitted_obj.best_estimator_
+        else:
+            fitted_pipe = fitted_obj
+        model = fitted_pipe.named_steps["model"]
+        if not hasattr(model, "feature_importances_"):
+            return None
+        importances = np.asarray(model.feature_importances_, dtype=float)
+    else:
+        return None
+
+    if importances.size != len(feature_names):
+        return None
+
+    df_imp = pd.DataFrame(
+        {
+            "feature": feature_names,
+            "importance": importances,
+        }
+    ).sort_values("importance", ascending=False)
+    return df_imp
+
+
 def run_mlp_only(csv_path: str | None = None, use_enriched: bool = False) -> None:
     """CV out-of-fold sur le MLP uniquement (rapide à lancer pour tester)."""
     print("Mode --mlp-only : MLP seul (OOF, même protocole que le pipeline complet).\n")
@@ -249,7 +378,9 @@ def run_model(
     csv_path: str | None = None,
     use_enriched: bool = False,
     xgboost_mode: str = "ask",
+    use_codecarbon: bool = False,
 ) -> None:
+    run_start = time.perf_counter()
     use_xgboost = _resolve_xgboost_choice(xgboost_mode)
     if use_xgboost:
         _ensure_xgboost()
@@ -257,15 +388,34 @@ def run_model(
     loaded = _load_xy(csv_path, use_enriched)
     if loaded is None:
         return
+    tracker = _maybe_start_codecarbon(use_codecarbon)
+    try:
+        _run_model_core(
+            loaded,
+            run_start,
+            use_xgboost,
+        )
+    finally:
+        _maybe_stop_codecarbon(tracker)
+
+
+def _run_model_core(
+    loaded: tuple,
+    run_start: float,
+    use_xgboost: bool,
+) -> None:
     csv_file, X, y, groups, feature_cols = loaded
 
     cv_splits = 3
     kf_shuffle = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
 
     results = []
+    model_times_s: dict[str, float] = {}
+    fitted_artifacts: dict[str, object] = {}
 
     # Baseline : régression linéaire (OLS) sur les mêmes features, même protocole OOF / groupes
     print("  Régression linéaire (baseline)")
+    t0 = time.perf_counter()
     pipe_linear = Pipeline(
         [
             ("scaler", StandardScaler()),
@@ -284,11 +434,13 @@ def run_model(
     lr_mae = mean_absolute_error(y, y_pred_lr)
     lr_rmse = np.sqrt(mean_squared_error(y, y_pred_lr))
     results.append(("linear_baseline", lr_mae, lr_rmse))
+    model_times_s["linear_baseline"] = time.perf_counter() - t0
     print(f"    -> linear_baseline terminé | MAE={lr_mae:.3f} RMSE={lr_rmse:.3f}")
 
     # RF défaut MODELE 1
 
     print("  Random forest default MODELE 1")
+    t0 = time.perf_counter()
     rf_estimators = 120
     pipe_rf = Pipeline([
         ("model", RandomForestRegressor(n_estimators=rf_estimators, max_depth=None, random_state=RANDOM_STATE, n_jobs=1)),
@@ -303,33 +455,35 @@ def run_model(
     rf_default_mae = mean_absolute_error(y, y_pred)
     rf_default_rmse = np.sqrt(mean_squared_error(y, y_pred))
     results.append(("rf_default", rf_default_mae, rf_default_rmse))  # calcul du MAE et RMSE
+    model_times_s["rf_default"] = time.perf_counter() - t0
     print(f"    -> rf_default terminé | MAE={rf_default_mae:.3f} RMSE={rf_default_rmse:.3f}")
 
     # Random forest tuned MODELE 2
 
     print("  Random forest tuned MODELE 2")
+    t0 = time.perf_counter()
     pipe_tuned = Pipeline([
         ("model", RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=1)),
     ])
     inner_cv_rf: GroupKFold | KFold
+    inner_rf = max(2, min(RF_TUNED_INNER_SPLITS, cv_splits))
     if groups is not None:
-        inner_cv_rf = GroupKFold(n_splits=cv_splits)
+        inner_cv_rf = GroupKFold(n_splits=inner_rf)
     else:
-        inner_cv_rf = KFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
-    # Espace de recherche élargi et plus stable que la version initiale :
-    # - davantage de candidats utiles
-    # - contrôle de complexité (split/leaf) pour limiter le sur-apprentissage
+        inner_cv_rf = KFold(n_splits=inner_rf, shuffle=True, random_state=RANDOM_STATE)
+    # Espace de recherche : un peu réduit vs l’historique (pas de 500 arbres) pour accélérer
+    # sans sacrifier trop de diversité d’hypothèses.
     search_rf_template = RandomizedSearchCV(
         pipe_tuned,
         param_distributions={
-            "model__n_estimators": [120, 200, 300, 500],
+            "model__n_estimators": RF_TUNED_N_ESTIMATORS,
             "model__max_depth": [None, 10, 15, 25, 35],
             "model__min_samples_split": [2, 5, 10],
             "model__min_samples_leaf": [1, 2, 4],
             "model__max_features": ["sqrt", "log2", 0.4, 0.6, 0.8],
             "model__bootstrap": [True, False],
         },
-        n_iter=24,
+        n_iter=RF_TUNED_RANDOM_ITER,
         cv=inner_cv_rf,
         scoring="neg_mean_absolute_error",
         random_state=RANDOM_STATE,
@@ -348,6 +502,7 @@ def run_model(
     rf_tuned_mae = mean_absolute_error(y, y_pred_tuned)
     rf_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_tuned))
     results.append(("rf_tuned", rf_tuned_mae, rf_tuned_rmse))
+    model_times_s["rf_tuned"] = time.perf_counter() - t0
     print(f"    -> rf_tuned terminé | MAE={rf_tuned_mae:.3f} RMSE={rf_tuned_rmse:.3f}")
 
     # XGBoost tuné si dispo MODELE 3
@@ -357,6 +512,7 @@ def run_model(
     y_pred_xgb: np.ndarray | None = None
     if use_xgboost and HAS_XGB:
         print("  Tuning XGBoost (OOF + groupes si disponibles)...")
+        t0 = time.perf_counter()
         pipe_xgb = Pipeline([
             ("model", XGBRegressor(random_state=RANDOM_STATE, n_jobs=1)),
         ])
@@ -393,6 +549,7 @@ def run_model(
         xgb_tuned_mae = mean_absolute_error(y, y_pred_xgb)
         xgb_tuned_rmse = np.sqrt(mean_squared_error(y, y_pred_xgb))
         results.append(("xgb_tuned", xgb_tuned_mae, xgb_tuned_rmse))
+        model_times_s["xgb_tuned"] = time.perf_counter() - t0
         print(f"    -> xgb_tuned terminé | MAE={xgb_tuned_mae:.3f} RMSE={xgb_tuned_rmse:.3f}")
     else:
         if use_xgboost:
@@ -400,12 +557,12 @@ def run_model(
         else:
             print("  (XGBoost désactivé par l'utilisateur)")
 
-    # CatBoost tuné si dispo (même X numérique après get_dummies que les autres modèles)
-    print("  CatBoost tuned MODELE 4")
-
+    # CatBoost tuné : uniquement si le paquet est installé (voir requirements.txt).
     y_pred_cat: np.ndarray | None = None
     if HAS_CATBOOST:
+        print("  CatBoost tuned MODELE 4")
         print("  Tuning CatBoost (OOF + groupes si disponibles)...")
+        t0 = time.perf_counter()
         pipe_cat = Pipeline(
             [
                 (
@@ -452,12 +609,12 @@ def run_model(
         cat_mae = mean_absolute_error(y, y_pred_cat)
         cat_rmse = np.sqrt(mean_squared_error(y, y_pred_cat))
         results.append(("catboost_tuned", cat_mae, cat_rmse))
+        model_times_s["catboost_tuned"] = time.perf_counter() - t0
         print(f"    -> catboost_tuned terminé | MAE={cat_mae:.3f} RMSE={cat_rmse:.3f}")
-    else:
-        print("  (CatBoost non installé : pip install catboost)")
 
     # MLP : X et y standardisés (voir _build_mlp_pipeline)
     print("  MLP (réseau dense sklearn, X+y scalés)")
+    t0 = time.perf_counter()
     pipe_mlp = _build_mlp_pipeline()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ConvergenceWarning)
@@ -473,6 +630,7 @@ def run_model(
     mlp_mae = mean_absolute_error(y, y_pred_mlp)
     mlp_rmse = np.sqrt(mean_squared_error(y, y_pred_mlp))
     results.append(("mlp_dense", mlp_mae, mlp_rmse))
+    model_times_s["mlp_dense"] = time.perf_counter() - t0
     print(f"    -> mlp_dense terminé | MAE={mlp_mae:.3f} RMSE={mlp_rmse:.3f}")
 
     print("\n" + "=" * 55)
@@ -495,7 +653,11 @@ def run_model(
 
     for name, mae, rmse in sorted(results, key=lambda x: x[1]):
         sous_10 = "  ✓ sous 10 min !" if mae < 10 else ""
-        print(f"  {name:18s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min{sous_10}")
+        t_model = model_times_s.get(name, 0.0)
+        print(
+            f"  {name:18s}  MAE = {mae:.3f} min   RMSE = {rmse:.3f} min"
+            f"   Temps={t_model:.1f}s{sous_10}"
+        )
     print("=" * 55)
     print(
         f"  Modèle retenu : {best_name} — {labels_fr.get(best_name, best_name)} "
@@ -506,6 +668,14 @@ def run_model(
         print("  Objectif < 10 min MAE atteint.")
     else:
         print(f"  Meilleur MAE : {best_mae:.2f} min. Descendre sous 10 min peut être limité par la variabilité météo.")
+
+    # Rapport benchmark (critère technique/performance + gouvernance)
+    benchmark_df = pd.DataFrame(results, columns=["model", "mae_min", "rmse_min"])
+    benchmark_df["runtime_s"] = benchmark_df["model"].map(model_times_s).fillna(0.0)
+    benchmark_df = benchmark_df.sort_values("mae_min", ascending=True)
+    benchmark_path = BASE_DIR / "model_benchmark_report.csv"
+    benchmark_df.to_csv(benchmark_path, index=False)
+    print(f"  Rapport benchmark sauvegardé : {benchmark_path.name}")
 
     # Prédictions pour probabilite_par_minute.py : uniquement OOF (jamais fit sur tout X puis predict(X))
     if best_name == "linear_baseline":
@@ -534,6 +704,54 @@ def run_model(
         f"\n  Prédictions sauvegardées (out-of-fold, sans fuite train→test) : {preds_path.name}"
     )
 
+    # Explicabilité : top variables du meilleur modèle
+    # (fit final sur tout le dataset, uniquement pour interprétation)
+    if best_name == "linear_baseline":
+        pipe_linear.fit(X, y)
+        fitted_artifacts[best_name] = pipe_linear
+    elif best_name == "rf_default":
+        pipe_rf.fit(X, y)
+        fitted_artifacts[best_name] = pipe_rf
+    elif best_name == "rf_tuned":
+        if groups is not None:
+            search_rf_template.fit(X, y, groups=groups)
+        else:
+            search_rf_template.fit(X, y)
+        fitted_artifacts[best_name] = search_rf_template
+    elif best_name == "xgb_tuned" and use_xgboost and HAS_XGB:
+        if groups is not None:
+            search_xgb_template.fit(X, y, groups=groups)
+        else:
+            search_xgb_template.fit(X, y)
+        fitted_artifacts[best_name] = search_xgb_template
+    elif best_name == "catboost_tuned" and HAS_CATBOOST:
+        if groups is not None:
+            search_cat_template.fit(X, y, groups=groups)
+        else:
+            search_cat_template.fit(X, y)
+        fitted_artifacts[best_name] = search_cat_template
+
+    if best_name in fitted_artifacts:
+        imp_df = _extract_feature_importance(best_name, fitted_artifacts[best_name], list(X.columns))
+        if imp_df is not None:
+            imp_path = BASE_DIR / "model_explainability_top_features.csv"
+            imp_df.head(20).to_csv(imp_path, index=False)
+            print(f"  Explicabilité sauvegardée : {imp_path.name} (top 20 variables)")
+        else:
+            print("  Explicabilité non disponible pour ce type de modèle.")
+    else:
+        print("  Explicabilité non générée pour ce modèle.")
+
+    # Proxy empreinte calcul (critère environnemental) : durée de calcul par modèle
+    total_runtime_s = time.perf_counter() - run_start
+    footprint_df = benchmark_df[["model", "runtime_s"]].copy()
+    footprint_df["runtime_share_pct"] = 100.0 * footprint_df["runtime_s"] / max(total_runtime_s, 1e-9)
+    footprint_path = BASE_DIR / "compute_footprint_proxy.csv"
+    footprint_df.to_csv(footprint_path, index=False)
+    print(f"  Proxy empreinte calcul sauvegardé : {footprint_path.name}")
+    print(f"  Temps total run modèle : {total_runtime_s:.1f}s")
+    _write_simple_energy_co2_estimate(footprint_df, total_runtime_s, BASE_DIR)
+
 
 if __name__ == "__main__":
     import argparse
@@ -556,8 +774,18 @@ if __name__ == "__main__":
         default="ask",
         help="Active XGBoost: ask (demande), on (force), off (désactive).",
     )
+    parser.add_argument(
+        "--codecarbon",
+        action="store_true",
+        help="Mesure énergie / CO₂eq (CodeCarbon) sur tout le run modèle. Requiert: pip install codecarbon",
+    )
     args = parser.parse_args()
     if args.mlp_only:
         run_mlp_only(csv_path=args.csv, use_enriched=args.enriched)
     else:
-        run_model(csv_path=args.csv, use_enriched=args.enriched, xgboost_mode=args.xgboost)
+        run_model(
+            csv_path=args.csv,
+            use_enriched=args.enriched,
+            xgboost_mode=args.xgboost,
+            use_codecarbon=args.codecarbon,
+        )
