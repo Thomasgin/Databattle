@@ -32,8 +32,7 @@ Le pipeline principal est `main.py` (clustering → modèle → analyse par aér
   - Python 3
 - Frameworks :
   - Scikit-learn
-  - XGBoost (optionnel)
-  - CatBoost (optionnel)
+  - XGBoost, CatBoost (`requirements.txt`)
 - Outils :
   - Pandas, NumPy
   - Matplotlib, Seaborn
